@@ -17,9 +17,10 @@ import numpy as np
 from sqlalchemy import select
 
 from backend.app.ai.report_generator import generate_report_for_run
-from backend.app.analysis.interface import AnalyzerInput
+from backend.app.analysis.analyzers import calc_stats
+from backend.app.analysis.interface import AnalyzerInput, producer_of
 from backend.app.analysis.quality import cross_check_ndvi, evaluate_layer_quality
-from backend.app.analysis.registry import get_analyzer
+from backend.app.analysis.registry import analyzers_for, get_analyzer
 from backend.app.core import constants as C
 from backend.app.core.errors import AppError, GEENotConfiguredError
 from backend.app.core.run_settings import RunSettings
@@ -101,6 +102,7 @@ class LayerRecord:
     cloud_masked_pct: float | None
     quality_flag: QualityFlag
     prev_time: int | None = None
+    producer: str = "rules:formula:rules-1.0"
     png: str = ""
     vmin: float | None = None
     vmax: float | None = None
@@ -138,6 +140,7 @@ class ReconPipeline:
         source: DataSource,
         gateway: GEEGateway | None = None,
         now: int | None = None,
+        user_id: int = 0,
     ) -> None:
         self.job = job
         self.run_id = job.run_id
@@ -149,6 +152,17 @@ class ReconPipeline:
         self.now = now or now_ts()
         self.state = PipelineState()
         self.ctx = CallContext(run_id=self.run_id, on_event=self._on_gateway_event)
+        self.user_id = user_id
+        self.producers: dict[str, str] = {}  # qatlam nomi -> "usul:analizator:versiya"
+        self.model_notes: list[str] = []
+
+    def _run(self, name: str, data: AnalyzerInput) -> Any:
+        """Analizatorni registrdan nomi bilan oladi, bajaradi va qatlamlar muallifini yozib qo'yadi."""
+        an = get_analyzer(name)
+        out = an.run(data)
+        for lname in out.layers:
+            self.producers[lname] = producer_of(an)
+        return out
 
     # ------------------------------------------------------------------
     async def _on_gateway_event(self, kind: str, data: dict[str, Any]) -> None:
@@ -253,7 +267,8 @@ class ReconPipeline:
         log_step(4, 10, "Barmoq izi")
         assert self.state.discovery is not None
         ids = [f"{sc.dataset}/{sc.scene_id}" for sc in self.state.discovery.scenes]
-        fp = compute_recon_fingerprint(self.aoi, ids)
+        # Foydalanuvchi ham barmoq iziga kiradi: har kim o'z maydonlarini va hisobotlarini oladi
+        fp = compute_recon_fingerprint(self.aoi, ids + [f"__user__:{self.user_id}"])
         self.state.fingerprint = fp
         async with db.session_scope() as s:
             existing = (
@@ -263,6 +278,7 @@ class ReconPipeline:
                         RunModel.fingerprint == fp,
                         RunModel.status == JobStatus.COMPLETED,
                         RunModel.id != self.run_id,
+                        RunModel.user_id == self.user_id,
                     )
                     .order_by(RunModel.id.desc())
                 )
@@ -366,6 +382,7 @@ class ReconPipeline:
                     cloud_masked_pct=q["cloud_masked_pct"],
                     quality_flag=q["quality_flag"],
                     prev_time=prev_time,
+                    producer=self.producers.get(name, "rules:formula:rules-1.0"),
                 )
             )
 
@@ -392,7 +409,7 @@ class ReconPipeline:
         terrain: dict[str, np.ndarray] = {}
         if "dem" in self.state.downloaded and disc.dem is not None:
             raw = st.load_arrays(st.raw_path(self.run_id, "dem"))
-            out = get_analyzer("terrain").run(AnalyzerInput(arrays=raw, pixel_size_m=px, aoi_mask=aoi))
+            out = self._run("terrain", AnalyzerInput(arrays=raw, pixel_size_m=px, aoi_mask=aoi))
             layers = self._mask_aoi(out.layers)
             st.save_arrays(st.derived_path(self.run_id, "dem"), layers)
             self._add_layers(layers, out.stats, disc.dem.acq_time, SensorKind.DEM, disc.dem.dataset,
@@ -421,10 +438,10 @@ class ReconPipeline:
         prev_s1: tuple[Observation, np.ndarray] | None = None
         for o in s1_obs:
             raw = st.load_arrays(st.raw_path(self.run_id, o.key))
-            out = get_analyzer("sar").run(AnalyzerInput(arrays=raw, pixel_size_m=px, aoi_mask=aoi))
+            out = self._run("sar", AnalyzerInput(arrays=raw, pixel_size_m=px, aoi_mask=aoi))
             layers = self._mask_aoi(out.layers)
             if prev_s1 is not None:
-                ch = get_analyzer("change").run(
+                ch = self._run("change",
                     AnalyzerInput(arrays={"vv": layers["vv"]}, aoi_mask=aoi,
                                   extra={"previous": {"vv": prev_s1[1]}, "names": ["vv"]})
                 )
@@ -448,7 +465,7 @@ class ReconPipeline:
         landsat_ndvi: list[tuple[Observation, np.ndarray]] = []
         for o in ls_obs:
             raw = st.load_arrays(st.raw_path(self.run_id, o.key))
-            out = get_analyzer("thermal").run(AnalyzerInput(arrays=raw, pixel_size_m=px, aoi_mask=aoi))
+            out = self._run("thermal", AnalyzerInput(arrays=raw, pixel_size_m=px, aoi_mask=aoi))
             layers = self._mask_aoi(out.layers)
             cloud = out.metadata.get("cloud_mask")
             st.save_arrays(st.derived_path(self.run_id, o.key), layers)
@@ -478,8 +495,8 @@ class ReconPipeline:
             refl = {b: raw[b] for b in D.S2_REFLECTANCE_BANDS}
             masked = {b: np.where(cloud | nodata, np.nan, v).astype(np.float32) for b, v in refl.items()}
 
-            idx = get_analyzer("indices").run(AnalyzerInput(arrays=masked, pixel_size_m=px, aoi_mask=aoi))
-            rgbf = get_analyzer("rgb").run(AnalyzerInput(arrays=masked, pixel_size_m=px, aoi_mask=aoi))
+            idx = self._run("indices", AnalyzerInput(arrays=masked, pixel_size_m=px, aoi_mask=aoi))
+            rgbf = self._run("rgb", AnalyzerInput(arrays=masked, pixel_size_m=px, aoi_mask=aoi))
             layers = self._mask_aoi({**idx.layers, **rgbf.layers})
             stats = {**idx.stats, **rgbf.stats}
 
@@ -498,15 +515,33 @@ class ReconPipeline:
             extra: dict[str, Any] = {"cloud_mask": cloud | nodata, "scl": scl}
             if prev is not None:
                 extra["delta_nbr"] = layers["nbr"] - prev["nbr"]
-            lc = get_analyzer("landcover").run(AnalyzerInput(arrays=lc_in, pixel_size_m=px, aoi_mask=aoi, extra=extra))
+            # Yer qoplami sloti: qoidaviy (standart) yoki sozlamada tanlangan ML/CV modeli
+            lc_inputs = {**masked, **{k: v for k, v in layers.items()}, **lc_in}
+            lc = self._run(self.s.landcover_analyzer, AnalyzerInput(arrays=lc_inputs, pixel_size_m=px, aoi_mask=aoi, extra=extra))
+            if "confidence" not in lc.layers:
+                lc.layers["confidence"] = lc.confidence if lc.confidence is not None else np.full(aoi.shape, np.nan, np.float32)
+                self.producers["confidence"] = self.producers.get("landcover", "")
             layers.update(lc.layers)
             stats.update(lc.stats)
-            classes = lc.metadata["classes"]
+            stats.setdefault("confidence", calc_stats(lc.layers["confidence"], aoi))
+            classes = lc.metadata.get("classes")
+            if classes is None:
+                classes = np.nan_to_num(lc.layers["landcover"], nan=0).astype(np.uint8)
             self._record_class_areas(o.obs_time, classes, lc.layers["confidence"], row_area, sar_used)
+
+            # Qo'shimcha ML/CV qatlamlari (registrdagi slot="extra" analizatorlar)
+            for model in analyzers_for("s2_observation", "extra"):
+                try:
+                    mo = self._run(model.name, AnalyzerInput(arrays=lc_inputs, pixel_size_m=px, aoi_mask=aoi, extra=extra))
+                except KeyError as e:
+                    self.model_notes.append(f"{model.name}: kirish maʼlumoti yoʻq ({e})")
+                    continue
+                layers.update(self._mask_aoi(mo.layers))
+                stats.update(mo.stats)
 
             # O'zgarishlar (oldingi haqiqiy S2 kuzatuvga nisbatan)
             if prev is not None:
-                ch = get_analyzer("change").run(
+                ch = self._run("change",
                     AnalyzerInput(
                         arrays={k: layers[k] for k in CHANGE_LAYERS_S2},
                         aoi_mask=aoi,
@@ -789,6 +824,11 @@ class ReconPipeline:
             ],
             "weather": weather,
             "weather_impact": self.state.impacts,
+            "analyzers": {
+                "landcover": self.s.landcover_analyzer,
+                "producers": dict(sorted(set(self.producers.items()))),
+                "notes_uz": self.model_notes,
+            },
             "quality_flags": quality_flags,
         }
 
@@ -814,7 +854,7 @@ class ReconPipeline:
                     dataset=lr.dataset, acq_time=lr.acq_time, prev_time=lr.prev_time,
                     scene_ids=json.dumps(lr.scene_ids), file_path=lr.png, unit=spec.unit,
                     min_val=lr.vmin, max_val=lr.vmax, valid_pct=lr.valid_pct,
-                    cloud_masked_pct=lr.cloud_masked_pct, quality_flag=int(lr.quality_flag),
+                    cloud_masked_pct=lr.cloud_masked_pct, quality_flag=int(lr.quality_flag), producer=lr.producer,
                 )
                 s.add(lm)
                 if lr.stats:
@@ -939,20 +979,25 @@ def make_runner(
     run_settings: RunSettings,
     source: DataSource,
     gateway: GEEGateway | None,
+    user_id: int = 0,
 ) -> Any:
     """JobManager uchun runner funksiyasi."""
 
     async def _runner(job: Job) -> None:
-        await ReconPipeline(job, aoi, area_km2, run_settings, source, gateway).run()
+        await ReconPipeline(job, aoi, area_km2, run_settings, source, gateway, user_id=user_id).run()
 
     return _runner
 
 
-async def create_run_row(aoi: dict[str, Any], area_km2: float, run_settings: RunSettings) -> int:
-    """Yangi run qatorini RUNNING holatida yaratadi."""
+async def create_run_row(
+    aoi: dict[str, Any], area_km2: float, run_settings: RunSettings, user_id: int, name: str = ""
+) -> int:
+    """Yangi run (saqlanadigan maydon) qatorini RUNNING holatida yaratadi."""
     async with db.session_scope() as s:
         run = RunModel(
             status=JobStatus.RUNNING,
+            user_id=user_id,
+            name=name.strip()[:120] or f"Maydon {fmt_local(now_ts())}",
             aoi_geojson=json.dumps(aoi),
             area_km2=round(area_km2, 6),
             settings_json=run_settings.model_dump_json(),

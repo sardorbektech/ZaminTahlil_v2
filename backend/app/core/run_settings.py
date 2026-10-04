@@ -40,6 +40,7 @@ class RunSettings(BaseModel):
     ai_provider: Literal["openrouter", "openai", "ollama"] = C.DEFAULT_AI_PROVIDER
     ai_model: str = Field(C.DEFAULT_AI_MODEL, min_length=1, max_length=200)
     ai_history_size: int = Field(C.DEFAULT_AI_HISTORY_SIZE, ge=C.AI_HISTORY_RANGE[0], le=C.AI_HISTORY_RANGE[1])
+    landcover_analyzer: str = Field(C.DEFAULT_LANDCOVER_ANALYZER, min_length=1, max_length=64)
 
 
 class RunSettingsUpdate(BaseModel):
@@ -61,6 +62,7 @@ class RunSettingsUpdate(BaseModel):
     ai_provider: str | None = None
     ai_model: str | None = None
     ai_history_size: int | None = None
+    landcover_analyzer: str | None = None
 
 
 SETTINGS_FIELDS = tuple(RunSettings.model_fields.keys())

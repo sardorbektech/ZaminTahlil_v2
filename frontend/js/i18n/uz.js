@@ -5,6 +5,14 @@
 
 export const uz = {
   app: { title: "ZaminTahlil — hudud rekognossirovkasi", brand: "ZaminTahlil" },
+  login: {
+    hint: "Username va parolni kiriting. Bunday username boʻlmasa, yangi foydalanuvchi yaratiladi.",
+    username: "Username",
+    password: "Parol",
+    submit: "Kirish",
+    failed: "Username yoki parol notoʻgʻri",
+    created: "Yangi foydalanuvchi yaratildi",
+  },
   topbar: {
     draw_rect: "Toʻrtburchak",
     draw_rect_title: "Xaritada toʻgʻri toʻrtburchak chizish",
@@ -16,6 +24,15 @@ export const uz = {
     recon: "Rekognossirovka",
     stop: "Toʻxtatish",
     settings: "Sozlamalar",
+    name_placeholder: "Maydon nomi (ixtiyoriy)",
+    view3d: "3D",
+    view2d: "2D",
+    view3d_title: "Maydonni 3D relyefda koʻrish / 2D ga qaytish",
+    labels: "Nomlar",
+    labels_title: "Yer qoplami nomlarini koʻrsatish / yashirish",
+    areas: "Maydonlarim",
+    areas_title: "Saqlangan maydonlar",
+    logout: "Chiqish",
   },
   states: {
     idle: "Hudud chizing",
@@ -31,6 +48,7 @@ export const uz = {
     weather: "Ob-havo",
     satellites: "Sunʼiy yoʻldoshlar",
     report: "Hisobot",
+    chat: "Chat",
     usage: "Nazorat",
   },
   common: {
@@ -71,6 +89,10 @@ export const uz = {
     composite_label: "Kompozit",
     no_layers: "Qatlamlar yoʻq",
     changes_vs: "oldingi kuzatuv",
+    methods: { rules: "Qoidaviy", classic_ml: "ML", cv: "CV" },
+    clear_all: "Hammasini olib tashlash",
+    clear_all_title: "Xaritadagi barcha belgilangan qatlamlarni bitta tugma bilan olib tashlash",
+    shown_count: (n) => `Xaritada: ${n} ta qatlam`,
     scenes: "Kadrlar",
   },
   info: {
@@ -144,6 +166,42 @@ export const uz = {
     meta: "Model",
   },
   usage: { title: "Tashqi soʻrovlar nazorati", empty: "Soʻrovlar yoʻq" },
+  view3d: {
+    relief: "Relyef",
+    exaggeration: "Balandlik koʻpaytmasi",
+    exaggeration_title: "1× — haqiqiy dunyo masshtabi; 10× gacha balandliklar koʻpaytiriladi",
+    real: "haqiqiy",
+    only_aoi: "Faqat maydon",
+    only_aoi_title: "Faqat tahlil qilingan maydonni koʻrsatish / atrofi bilan koʻrsatish",
+    focus: "Maydonga qaytish",
+    focus_title: "Kamerani tahlil qilingan maydonga qaratish",
+    hint: "Sichqoncha: chap — aylantirish, oʻng — surish, gʻildirak — yaqinlashtirish; bosish — nuqta qiymatlari",
+    no_basemap: "Esri tasviri yuklanmadi (faqat qatlamlar)",
+    unavailable: "3D uchun relyef maʼlumoti yoʻq",
+  },
+  chat: {
+    scope: "AI faqat shu maydon va uning tahlil natijalari haqidagi savollarga javob beradi.",
+    placeholder: "Maydon haqida savol yozing… (Enter — yuborish)",
+    send: "Yuborish",
+    clear: "Tozalash",
+    clear_confirm: "Shu maydon boʻyicha suhbat tarixi oʻchirilsinmi?",
+    empty: "Hali savol berilmagan.",
+    thinking: "AI javob tayyorlamoqda…",
+    you: "Siz",
+    ai: "AI",
+  },
+  areas: {
+    title: "Maydonlarim",
+    empty: "Saqlangan maydonlar yoʻq",
+    open: "Ochish",
+    rename: "Nomlash",
+    delete: "Oʻchirish",
+    dates: "sana",
+    rename_prompt: "Maydonning yangi nomi:",
+    delete_confirm: (name) => `«${name}» maydoni barcha natijalari bilan butunlay oʻchirilsinmi?`,
+    deleted: "Maydon oʻchirildi",
+    status: { completed: "tayyor", running: "bajarilmoqda", failed: "xato" },
+  },
   settings: {
     title: "Sozlamalar",
     save: "Saqlash",
@@ -165,6 +223,7 @@ export const uz = {
       ai_provider: "AI provayderi",
       ai_model: "AI modeli",
       ai_history_size: "AI xabarlar tarixi",
+      landcover_analyzer: "Yer qoplami analizatori",
     },
     choices: { BOTH: "Ikkalasi", ASCENDING: "Koʻtariluvchi", DESCENDING: "Tushuvchi" },
     conn: {
@@ -204,5 +263,6 @@ export function t(path) {
 export function applyI18n(root = document) {
   root.querySelectorAll("[data-i18n]").forEach((el) => (el.textContent = t(el.dataset.i18n)));
   root.querySelectorAll("[data-i18n-title]").forEach((el) => (el.title = t(el.dataset.i18nTitle)));
+  root.querySelectorAll("[data-i18n-placeholder]").forEach((el) => (el.placeholder = t(el.dataset.i18nPlaceholder)));
   document.title = uz.app.title;
 }

@@ -101,6 +101,11 @@ LAYER_SPECS: dict[str, LayerSpec] = {
 }
 
 
+def register_layer_spec(name: str, spec: LayerSpec) -> None:
+    """ML/CV modellari o'z chiqish qatlamlarini katalogga qo'shadi (UI va API avtomatik ko'rsatadi)."""
+    LAYER_SPECS[name] = spec
+
+
 def _hex_to_rgba(h: str) -> tuple[int, int, int, int]:
     h = h.lstrip("#")
     r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)

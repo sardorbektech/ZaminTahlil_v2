@@ -1,18 +1,23 @@
 /**
  * ZaminTahlil frontend — faqat koʻrsatish va boshqaruv; barcha hisoblashlar backendda (/api/v1).
  * Holatlar: idle → ready → running → done | cancelled | error. Ishlayotganda faqat «Toʻxtatish» faol.
+ * Kirish: username + parol (har bir soʻrovda Basic sarlavha), saqlangan maydonlar, 2D/3D koʻrinish, chat.
  */
-import { api } from "./api/client.js";
+import { api, currentUsername, loadStoredCredentials, onAuthLost, setCredentials } from "./api/client.js";
 import { listenRun } from "./api/sse.js";
 import { applyI18n, uz } from "./i18n/uz.js";
+import { clearLabels2d, initLabels2d, setLabels2d, toggleLabels2d } from "./map/labels2d.js";
 import { areaKm2, clearAoi, drawShape, geometry, getAoiLayer, getMap, initMap, setMapLocked, showAoi } from "./map/leaflet_init.js";
 import { initOverlays, setBounds } from "./map/overlays.js";
 import { openPixelPopup } from "./map/pixel_popup.js";
 import { startScan, stopScan } from "./map/scan_animation.js";
+import { close3d, focus3d, is3dOpen, open3d, refresh3d, reset3d, scope3d, setExaggeration, setLabels3d, setScope3d } from "./map/view3d.js";
 import { S, store } from "./state.js";
-import { clearDates, initDateSlider, setDates } from "./ui/date_slider.js";
+import { initAreas, openAreas } from "./ui/areas_modal.js";
+import { initChat, loadChat } from "./ui/chat_panel.js";
+import { clearDates, initDateSlider, nearestTs, setDates } from "./ui/date_slider.js";
 import { loadInfo, resetInfo, setInfoDate } from "./ui/info_panel.js";
-import { initLayersPanel, loadLayers, resetLayers, setLayersDate, setLayersLocked } from "./ui/layers_panel.js";
+import { initLayersPanel, loadLayers, onLayersChanged, prefetchVisible, resetLayers, setLayersLocked, setLayersPos, visibleStack } from "./ui/layers_panel.js";
 import { repaginateAll } from "./ui/paginate.js";
 import { downloadReport, renderReport, renderUsage, reportGenerating } from "./ui/report_view.js";
 import { loadSatellites, resetSatellites } from "./ui/satellites_panel.js";
@@ -21,18 +26,22 @@ import { initTabs } from "./ui/tabs.js";
 import { toast } from "./ui/toast.js";
 import { loadWeather, resetWeather } from "./ui/weather_panel.js";
 
-const LAST_RUN_KEY = "zt:lastRun";
 let sse = null;
 let lockedEls = [];
+let labelsData = null; // {dates: [{acq_time_ts, labels}]}
+let labelsOn = true;
+let currentPos = 0;
+let lastLabelTs = null;
 
 const $ = (id) => document.getElementById(id);
+const lastRunKey = () => `zt:lastRun:${currentUsername() || ""}`;
 
 function remember(id) {
-  try { id ? localStorage.setItem(LAST_RUN_KEY, String(id)) : localStorage.removeItem(LAST_RUN_KEY); } catch (_e) { /* saqlab boʻlmadi */ }
+  try { id ? localStorage.setItem(lastRunKey(), String(id)) : localStorage.removeItem(lastRunKey()); } catch (_e) { /* saqlab boʻlmadi */ }
 }
 
 function recall() {
-  try { return parseInt(localStorage.getItem(LAST_RUN_KEY) || "", 10) || null; } catch (_e) { return null; }
+  try { return parseInt(localStorage.getItem(lastRunKey()) || "", 10) || null; } catch (_e) { return null; }
 }
 
 // ---------------------------------------------------------------------------
@@ -43,7 +52,7 @@ function setLocked(locked) {
   setMapLocked(locked);
   setLayersLocked(locked);
   if (locked) {
-    lockedEls = Array.from(document.querySelectorAll("#app button, #app input, #app select")).filter(
+    lockedEls = Array.from(document.querySelectorAll("#app button, #app input, #app select, #app textarea")).filter(
       (el) => el.id !== "btn-stop" && !el.disabled,
     );
     lockedEls.forEach((el) => (el.disabled = true));
@@ -60,6 +69,8 @@ function updateUI() {
   $("btn-stop").disabled = !running;
   if (!running) {
     $("btn-recon").disabled = !store.aoi || store.areaKm2 > store.maxAoiKm2;
+    $("btn-3d").disabled = !store.runId;
+    $("btn-labels").disabled = !store.runId;
   }
   const map = getMap();
   if (running) startScan(map, getAoiLayer());
@@ -72,17 +83,71 @@ function setProgress(frac, text) {
 }
 
 // ---------------------------------------------------------------------------
+// 2D / 3D va nomlar
+// ---------------------------------------------------------------------------
+function labelsAt(ts) {
+  const ds = labelsData?.dates || [];
+  if (!ds.length) return [];
+  let pick = ds[0];
+  for (const d of ds) if (ts === null || d.acq_time_ts <= ts) pick = d;
+  return pick.labels;
+}
+
+function updateLabels(force = false) {
+  const ts = nearestTs(currentPos);
+  if (!force && ts === lastLabelTs) return;
+  lastLabelTs = ts;
+  setLabels2d(labelsOn ? labelsAt(ts) : []);
+  refresh3d();
+}
+
+async function toggle3d() {
+  if (is3dOpen()) {
+    close3d();
+    $("btn-3d").classList.remove("on");
+    $("btn-3d-text").textContent = uz.topbar.view3d;
+    getMap().invalidateSize();
+    return;
+  }
+  if (!store.runId) return;
+  $("btn-3d").classList.add("on");
+  $("btn-3d-text").textContent = uz.topbar.view2d;
+  try {
+    await open3d(store.runId, visibleStack, () => (labelsOn ? labelsAt(nearestTs(currentPos)) : []));
+  } catch (e) {
+    toast(e.status === 404 ? uz.view3d.unavailable : e.message, "error");
+    close3d();
+    $("btn-3d").classList.remove("on");
+    $("btn-3d-text").textContent = uz.topbar.view3d;
+  }
+}
+
+function toggleLabels() {
+  labelsOn = !labelsOn;
+  $("btn-labels").classList.toggle("on", labelsOn);
+  toggleLabels2d(labelsOn, labelsAt(nearestTs(currentPos)));
+  setLabels3d(labelsOn);
+}
+
+// ---------------------------------------------------------------------------
 // Natijalar
 // ---------------------------------------------------------------------------
 function clearResults() {
   getMap()?.closePopup();
+  reset3d();
+  $("btn-3d").classList.remove("on");
+  $("btn-3d-text").textContent = uz.topbar.view3d;
   resetLayers(); // overlaylar olib tashlanadi, object URL lar revoke qilinadi
   resetInfo();
   resetWeather();
   resetSatellites();
   renderReport(null, null);
   renderUsage(null);
+  loadChat(null);
   clearDates();
+  clearLabels2d();
+  labelsData = null;
+  lastLabelTs = null;
   store.patch({ runId: null });
 }
 
@@ -91,22 +156,53 @@ async function loadResults(runId) {
   if (run.status !== "completed") throw new Error(run.error?.message_uz || uz.states.error);
   store.patch({ runId });
   remember(runId);
+  $("area-name").value = run.name || "";
   setBounds(L.latLngBounds(run.bounds_latlon));
-  const date = setDates(run.observation_dates);
-  const [layers, classes, changes, sats, weather, usage] = await Promise.all([
+  currentPos = setDates(run.observation_dates);
+  const [layers, classes, changes, sats, weather, usage, labels] = await Promise.all([
     api.layers(runId), api.classes(runId), api.changes(runId), api.satellites(runId), api.weather(runId), api.usage(runId),
+    api.labels(runId).catch(() => ({ dates: [] })),
   ]);
-  setLayersDate(date);
-  setInfoDate(date);
-  loadLayers(runId, layers.layers);
+  labelsData = labels;
+  loadLayers(runId, layers.layers, run.observation_dates);
+  prefetchVisible();
+  setInfoDate(nearestTs(currentPos));
   loadInfo({ run, summary: run, classes, changes, sats });
   loadWeather(weather);
   loadSatellites(sats);
   renderUsage(usage);
+  updateLabels(true);
+  loadChat(runId);
   let rep = null;
   try { rep = await api.report(runId); } catch (_e) { rep = null; }
   renderReport(rep, runId);
+  updateUI();
   return run;
+}
+
+/** Saqlangan maydonni ochish (Maydonlarim oynasidan). */
+async function openArea(area) {
+  if (store.state === S.RUNNING) return;
+  clearResults();
+  clearAoi();
+  showAoi(area.aoi);
+  store.set(S.DONE, { aoi: area.aoi, areaKm2: area.area_km2 });
+  $("area-badge").textContent = `${area.area_km2.toFixed(2)} ${uz.common.km2}`;
+  try {
+    await loadResults(area.id);
+    setProgress(1, `${area.name}`);
+  } catch (e) {
+    toast(e.message, "error");
+  }
+}
+
+function onAreaDeleted(id) {
+  if (store.runId === id) {
+    clearResults();
+    remember(null);
+    setProgress(0, "");
+    updateUI();
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -132,10 +228,9 @@ async function onEvent(runId, ev) {
       break;
     case "duplicate": {
       toast(uz.toasts.no_new_data, "info", 5000);
-      const existing = ev.data.existing_run_id;
       setProgress(1, uz.toasts.no_new_data);
       store.set(S.DONE);
-      try { await loadResults(existing); } catch (e) { toast(e.message, "error"); }
+      try { await loadResults(ev.data.existing_run_id); } catch (e) { toast(e.message, "error"); }
       break;
     }
     case "done":
@@ -178,7 +273,7 @@ async function startRecon() {
   store.set(S.RUNNING, { aoi });
   setProgress(0, uz.toasts.started);
   try {
-    const res = await api.startRecon(aoi);
+    const res = await api.startRecon(aoi, $("area-name").value.trim());
     store.patch({ runId: null, activeRunId: res.run_id });
     toast(uz.toasts.started);
     follow(res.run_id);
@@ -202,13 +297,15 @@ async function stopRecon() {
 }
 
 // ---------------------------------------------------------------------------
-// Ishga tushirish
+// Xarita hodisalari
 // ---------------------------------------------------------------------------
 function onAoi(geom) {
   const area = areaKm2(geom);
   $("area-badge").textContent = `${area.toFixed(2)} ${uz.common.km2}`;
   if (store.state === S.RUNNING) return;
   if (area > store.maxAoiKm2) toast(uz.toasts.aoi_too_large(store.maxAoiKm2), "warn");
+  if (store.runId) clearResults(); // yangi hudud — eski natijalar xaritadan olinadi
+  $("area-name").value = "";
   store.set(geom ? S.READY : S.IDLE, { aoi: geom, areaKm2: area });
 }
 
@@ -218,9 +315,11 @@ function onMapClick(e) {
   openPixelPopup(getMap(), e.latlng, store.runId);
 }
 
-function onDate(ts) {
-  setLayersDate(ts);
-  setInfoDate(ts);
+function onPos(pos) {
+  currentPos = pos;
+  setLayersPos(pos);
+  setInfoDate(nearestTs(pos));
+  updateLabels();
 }
 
 async function generateReport() {
@@ -238,6 +337,9 @@ async function generateReport() {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Kirish va tiklash
+// ---------------------------------------------------------------------------
 async function restore() {
   try {
     const a = await api.active();
@@ -245,6 +347,7 @@ async function restore() {
       showAoi(a.run.aoi);
       store.patch({ aoi: a.run.aoi, areaKm2: a.run.area_km2 });
       $("area-badge").textContent = `${(a.run.area_km2 || 0).toFixed(2)} ${uz.common.km2}`;
+      $("area-name").value = a.run.name || "";
       store.set(S.RUNNING, { activeRunId: a.run.id });
       setProgress(a.run.progress, `${a.run.stage}/10`);
       follow(a.run.id);
@@ -261,10 +364,63 @@ async function restore() {
     $("area-badge").textContent = `${run.area_km2.toFixed(2)} ${uz.common.km2}`;
     store.set(S.DONE);
     await loadResults(last);
-    setProgress(1, uz.states.done);
+    setProgress(1, run.name || uz.states.done);
   } catch (_e) {
     remember(null);
   }
+}
+
+async function afterLogin() {
+  $("login-screen").hidden = true;
+  $("user-name").textContent = currentUsername() || "";
+  try {
+    const s = await api.getSettings();
+    store.patch({ maxAoiKm2: s.settings.max_aoi_km2 });
+  } catch (_e) { /* standart chegarada qoladi */ }
+  updateUI();
+  await restore();
+  repaginateAll();
+}
+
+function showLogin(message = "") {
+  sse?.close();
+  $("login-screen").hidden = false;
+  $("login-error").textContent = message;
+  $("login-user").value = currentUsername() || $("login-user").value;
+  $("login-pass").value = "";
+  $("login-user").focus();
+}
+
+async function submitLogin(e) {
+  e.preventDefault();
+  const username = $("login-user").value;
+  const password = $("login-pass").value;
+  try {
+    const res = await api.login(username, password);
+    setCredentials({ username: res.user.username, password });
+    if (res.created) toast(uz.login.created);
+    resetSession();
+    await afterLogin();
+  } catch (err) {
+    $("login-error").textContent = err.message || uz.login.failed;
+  }
+}
+
+function resetSession() {
+  if (store.state === S.RUNNING) store.set(S.CANCELLED);
+  clearResults();
+  clearAoi();
+  $("area-badge").textContent = `0.00 ${uz.common.km2}`;
+  $("area-name").value = "";
+  setProgress(0, "");
+  store.set(S.IDLE, { aoi: null, areaKm2: 0, activeRunId: null });
+}
+
+function logout() {
+  if (store.state === S.RUNNING) return;
+  setCredentials(null);
+  resetSession();
+  showLogin();
 }
 
 document.addEventListener("DOMContentLoaded", async () => {
@@ -272,10 +428,15 @@ document.addEventListener("DOMContentLoaded", async () => {
   initTabs();
   const map = initMap(onAoi, onMapClick);
   initOverlays(map);
+  initLabels2d(map);
   initLayersPanel();
-  initDateSlider(onDate);
+  onLayersChanged(refresh3d);
+  initDateSlider(onPos);
+  initChat();
+  initAreas(openArea, onAreaDeleted);
   initSettings((res) => store.patch({ maxAoiKm2: res.settings.max_aoi_km2 }));
   clearResults();
+  $("btn-labels").classList.add("on");
 
   $("btn-draw-rect").onclick = () => drawShape("rect");
   $("btn-draw-poly").onclick = () => drawShape("poly");
@@ -284,21 +445,52 @@ document.addEventListener("DOMContentLoaded", async () => {
     clearResults();
     remember(null);
     $("area-badge").textContent = `0.00 ${uz.common.km2}`;
+    $("area-name").value = "";
     setProgress(0, "");
     store.set(S.IDLE, { aoi: null, areaKm2: 0 });
   };
   $("btn-recon").onclick = startRecon;
   $("btn-stop").onclick = stopRecon;
+  $("btn-3d").onclick = toggle3d;
+  $("btn-labels").onclick = toggleLabels;
+  $("btn-areas").onclick = openAreas;
   $("btn-settings").onclick = openSettings;
+  $("btn-logout").onclick = logout;
   $("btn-report-gen").onclick = generateReport;
   $("btn-report-dl").onclick = downloadReport;
+  $("login-form").addEventListener("submit", submitLogin);
+  $("v3d-exag").addEventListener("input", (e) => {
+    const v = parseFloat(e.target.value);
+    $("v3d-exag-val").textContent = v === 1 ? `1× · ${uz.view3d.real}` : `${v}×`;
+    setExaggeration(v);
+  });
+  $("v3d-exag-val").textContent = `1× · ${uz.view3d.real}`;
+  $("btn-v3d-focus").onclick = focus3d;
+  $("btn-v3d-scope").onclick = async () => {
+    const next = scope3d() === "aoi" ? "context" : "aoi";
+    try {
+      await setScope3d(next);
+    } catch (e) {
+      toast(e.message, "error");
+    }
+    $("btn-v3d-scope").classList.toggle("on", scope3d() === "aoi");
+  };
+  document.querySelector(".v3d-info-close").onclick = () => (document.querySelector(".v3d-info").hidden = true);
 
   store.on(updateUI);
-  try {
-    const s = await api.getSettings();
-    store.patch({ maxAoiKm2: s.settings.max_aoi_km2 });
-  } catch (_e) { /* standart chegarada qoladi */ }
   updateUI();
-  await restore();
-  repaginateAll();
+  onAuthLost(() => showLogin(uz.login.failed));
+
+  const creds = loadStoredCredentials();
+  if (!creds) {
+    showLogin();
+    return;
+  }
+  try {
+    await api.login(creds.username, creds.password); // baza qayta yaratilgan boʻlsa foydalanuvchi qayta paydo boʻladi
+    await afterLogin();
+  } catch (_e) {
+    setCredentials(null);
+    showLogin();
+  }
 });

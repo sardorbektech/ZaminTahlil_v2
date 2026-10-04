@@ -39,7 +39,8 @@ SYSTEM_PROMPT = (
     "4. `low_confidence: true`, `quality_flag` GOOD boʻlmagan yoki \"(ehtimoliy)\" sinflarni \"past ishonchlilik\" "
     "yoki \"noaniq\" deb aniq belgilang.\n"
     "5. Har bir muhim raqam yonida uning manbasini (sensor/dataset) koʻrsating.\n"
-    "6. Javob faqat Markdown matn boʻlsin: JSON yoki ``` kod bloki emas.\n"
+    "6. Javob faqat Markdown matn boʻlsin: JSON yoki ``` kod bloki emas. Faqat lotin alifbosi — kirill yoki "
+    "boshqa tillardagi soʻzlar ishlatilmasin.\n"
     "7. Hisobot aynan quyidagi 7 boʻlimdan iborat boʻlsin (## sarlavha bilan, shu tartibda):\n"
     + "\n".join(f"   ## {i}. {s}" for i, s in enumerate(REPORT_SECTIONS, 1))
 )

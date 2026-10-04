@@ -15,10 +15,15 @@ from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from backend.app.analysis.analyzers import init_all_analyzers
+from backend.app.api.routes_auth import router as auth_router
 from backend.app.api.routes_recon import router as recon_router
 from backend.app.api.routes_settings import router as settings_router
 from backend.app.api.routes_usage import router as usage_router
-from backend.app.cleanup.retention import mark_interrupted_runs, start_retention_worker
+from backend.app.cleanup.retention import (
+    mark_interrupted_runs,
+    remove_runs_without_files,
+    start_retention_worker,
+)
 from backend.app.core.config import BASE_DIR
 from backend.app.core.errors import AppError
 from backend.app.core.telemetry import logger
@@ -33,6 +38,7 @@ async def lifespan(app: FastAPI) -> Any:
     init_all_analyzers()
     await init_db()
     await mark_interrupted_runs()
+    await remove_runs_without_files()
     retention = asyncio.create_task(start_retention_worker(), name="retention")
     try:
         yield
@@ -80,6 +86,7 @@ async def global_exception_handler(_request: Request, exc: Exception) -> JSONRes
     return JSONResponse(status_code=500, content={"code": "INTERNAL_ERROR", "message_uz": "Kutilmagan tizim xatoligi."})
 
 
+app.include_router(auth_router, prefix="/api/v1")
 app.include_router(recon_router, prefix="/api/v1")
 app.include_router(settings_router, prefix="/api/v1")
 app.include_router(usage_router, prefix="/api/v1")

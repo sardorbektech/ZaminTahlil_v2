@@ -102,7 +102,8 @@ async def test_invalid_aoi_rejected(client: AsyncClient):
 
 async def test_settings_get_put_validation(client: AsyncClient):
     s = (await client.get("/api/v1/settings")).json()
-    assert s["settings"]["lookback_days"] == 10 and s["settings"]["ai_model"] == "openrouter/free"
+    assert s["settings"]["lookback_days"] == 10 and s["settings"]["ai_model"] == "gpt-6-luna"
+    assert s["settings"]["ai_provider"] == "openai" and "landcover" in s["choices"]["landcover_analyzer"]
     assert "openrouter_api_key" not in json.dumps(s)  # maxfiy kalitlar qaytarilmaydi
     ok = await client.put("/api/v1/settings", json={"lookback_days": 20, "s1_orbit_pass": "ASCENDING"})
     assert ok.status_code == 200 and ok.json()["settings"]["lookback_days"] == 20

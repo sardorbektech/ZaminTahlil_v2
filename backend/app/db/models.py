@@ -14,14 +14,32 @@ class Base(DeclarativeBase):
     """Barcha modellar uchun asosiy sinf."""
 
 
+class UserModel(Base):
+    """Foydalanuvchi: username + parol xeshi (PBKDF2-SHA256, tuz bilan). Ochiq parol saqlanmaydi."""
+
+    __tablename__ = "users"
+    __table_args__ = (STRICT,)
+
+    id: Mapped[int] = mapped_column(INTEGER, primary_key=True, autoincrement=True)
+    username: Mapped[str] = mapped_column(TEXT, nullable=False, unique=True)
+    password_hash: Mapped[bytes] = mapped_column(BLOB, nullable=False)  # 32 bayt
+    salt: Mapped[bytes] = mapped_column(BLOB, nullable=False)  # 16 bayt
+    iterations: Mapped[int] = mapped_column(INTEGER, nullable=False)
+    created_at: Mapped[int] = mapped_column(INTEGER, nullable=False)
+
+
 class RunModel(Base):
-    """Rekognossirovka jarayoni yozuvi va uning barmoq izi."""
+    """Rekognossirovka (saqlangan maydon) yozuvi va uning barmoq izi."""
 
     __tablename__ = "runs"
     # AUTOINCREMENT: o'chirilgan run ID lari qayta ishlatilmaydi (API jurnali run_id bo'yicha bog'langan)
     __table_args__ = (Index("ix_runs_fingerprint", "fingerprint"), {**STRICT, "sqlite_autoincrement": True})
 
     id: Mapped[int] = mapped_column(INTEGER, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(
+        INTEGER, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    name: Mapped[str] = mapped_column(TEXT, nullable=False, default="")
     fingerprint: Mapped[bytes | None] = mapped_column(BLOB, nullable=True)
     status: Mapped[int] = mapped_column(INTEGER, nullable=False)
     aoi_geojson: Mapped[str] = mapped_column(TEXT, nullable=False)
@@ -47,6 +65,9 @@ class RunModel(Base):
         back_populates="run", cascade="all, delete-orphan", passive_deletes=True
     )
     reports: Mapped[list["ReportModel"]] = relationship(
+        back_populates="run", cascade="all, delete-orphan", passive_deletes=True
+    )
+    chat_messages: Mapped[list["ChatMessageModel"]] = relationship(
         back_populates="run", cascade="all, delete-orphan", passive_deletes=True
     )
 
@@ -102,6 +123,7 @@ class LayerModel(Base):
     valid_pct: Mapped[float] = mapped_column(REAL, nullable=False)
     cloud_masked_pct: Mapped[float | None] = mapped_column(REAL, nullable=True)
     quality_flag: Mapped[int] = mapped_column(INTEGER, nullable=False)
+    producer: Mapped[str] = mapped_column(TEXT, nullable=False, default="rules:formula:rules-1.0")
 
     run: Mapped["RunModel"] = relationship(back_populates="layers")
     stats: Mapped["LayerStatsModel | None"] = relationship(
@@ -225,3 +247,23 @@ class SettingsModel(Base):
     ai_provider: Mapped[str] = mapped_column(TEXT, nullable=False)
     ai_model: Mapped[str] = mapped_column(TEXT, nullable=False)
     ai_history_size: Mapped[int] = mapped_column(INTEGER, nullable=False)
+    landcover_analyzer: Mapped[str] = mapped_column(TEXT, nullable=False, default="landcover")
+
+
+class ChatMessageModel(Base):
+    """Maydon haqidagi AI suhbat xabarlari (role: 1 — foydalanuvchi, 2 — AI)."""
+
+    __tablename__ = "chat_messages"
+    __table_args__ = (Index("ix_chat_run", "run_id"), STRICT)
+
+    id: Mapped[int] = mapped_column(INTEGER, primary_key=True, autoincrement=True)
+    run_id: Mapped[int] = mapped_column(
+        INTEGER, ForeignKey("runs.id", ondelete="CASCADE"), nullable=False
+    )
+    role: Mapped[int] = mapped_column(INTEGER, nullable=False)
+    content: Mapped[str] = mapped_column(TEXT, nullable=False)
+    provider: Mapped[str | None] = mapped_column(TEXT, nullable=True)
+    model: Mapped[str | None] = mapped_column(TEXT, nullable=True)
+    created_at: Mapped[int] = mapped_column(INTEGER, nullable=False)
+
+    run: Mapped["RunModel"] = relationship(back_populates="chat_messages")

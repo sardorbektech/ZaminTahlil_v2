@@ -8,6 +8,7 @@ const FIELDS = [
   "lookback_days", "weather_past_days", "weather_forecast_days", "max_scene_cloud_pct",
   "cloud_score_threshold", "s1_orbit_pass", "analysis_resolution_m", "max_aoi_km2",
   "gee_request_timeout_s", "gee_max_retries", "gee_max_concurrency", "ai_provider", "ai_model", "ai_history_size",
+  "landcover_analyzer",
 ];
 const STEP = { cloud_score_threshold: 0.01, max_aoi_km2: 0.01, max_scene_cloud_pct: 1, analysis_resolution_m: 1 };
 

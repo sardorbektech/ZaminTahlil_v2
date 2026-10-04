@@ -160,9 +160,9 @@ body.locked #panel { opacity: .6; }
 @keyframes toast-in { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: none; } }
 
 /* Tor ekranlarda yuqori panel tugmalari faqat belgi bilan */
-@media (max-width: 1180px) {
+@media (max-width: 1500px) {
   #topbar .tb-group button > span:not(.ico) { display: none; }
-  #topbar #btn-recon > span, #topbar #btn-stop > span { display: inline; }
+  #topbar #btn-recon > span, #topbar #btn-stop > span, #topbar #btn-3d > span { display: inline; }
   .brand { display: none; }
   #workspace { grid-template-columns: 1fr 360px; }
 }
@@ -171,3 +171,39 @@ body.locked #panel { opacity: .6; }
   #bottombar { grid-template-columns: 1fr; gap: 2px; }
   #app { grid-template-rows: 48px 1fr 64px; }
 }
+
+/* Kirish oynasi */
+.login-screen { position: fixed; inset: 0; z-index: 7000; display: flex; align-items: center; justify-content: center;
+  background: radial-gradient(circle at 30% 20%, #13213d, var(--bg) 70%); }
+.login-screen[hidden] { display: none; }
+.login-box { width: min(360px, 92vw); display: flex; flex-direction: column; gap: 10px; padding: 22px; background: var(--bg2);
+  border: 1px solid var(--line); border-radius: 12px; box-shadow: 0 20px 60px rgba(0,0,0,.5); }
+.login-box h2 { color: var(--accent); font-size: 20px; }
+.login-box label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); }
+.login-box input { padding: 7px 9px; color: var(--text); }
+.login-box button { justify-content: center; padding: 8px; }
+.login-error { min-height: 16px; color: var(--danger); font-size: 12px; }
+
+.area-name-input { width: 190px; min-width: 70px; flex: 0 1 190px; }
+#topbar .tb-group { flex-shrink: 1; }
+#topbar .tb-center { min-width: 0; }
+#btn-3d.on, #btn-labels.on { border-color: var(--accent); color: var(--accent); }
+.areas-box { width: min(760px, 94vw); height: min(560px, 88vh); }
+.areas-box .paged { flex: 1; min-height: 0; }
+
+/* Matn kiritish maydonlari: qorongʻi fon, oq matn (kirish oynasi ham) */
+input:not([type="range"]):not([type="checkbox"]):not([type="radio"]), textarea, select {
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+input::placeholder, textarea::placeholder { color: #6b7a96; }
+input:focus, textarea:focus, select:focus { outline: none; border-color: var(--accent); }
+input:-webkit-autofill, input:-webkit-autofill:focus {
+  -webkit-text-fill-color: var(--text);
+  caret-color: var(--text);
+  box-shadow: 0 0 0 40px var(--bg) inset;
+}
+.login-box input { padding: 8px 10px; font-size: 14px; }
+#topbar { font-size: 14px; }

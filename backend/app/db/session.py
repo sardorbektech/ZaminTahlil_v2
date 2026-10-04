@@ -1,10 +1,13 @@
 """Ma'lumotlar bazasi sessiyasi va initsializatsiyasi (aiosqlite, WAL rejimi, foreign keys).
 
-Sxema versiyasi `PRAGMA user_version` da saqlanadi. Run ma'lumotlari 24 soatdan keyin
-baribir o'chiriladi, shuning uchun eski sxemali baza qayta yaratiladi (migratsiyasiz).
+Sxema versiyasi `PRAGMA user_version` da saqlanadi.
+- Baza fayli yo'q yoki bo'sh bo'lsa — jadvallar noldan yaratiladi (faylni qo'lda o'chirish xavfsiz).
+- v4 dan eski sxema (saqlanadigan maydonlar va foydalanuvchilar qo'shilishidan oldingi) qayta yaratiladi.
+- v4 va undan keyingilar uchun MIGRATIONS ro'yxatidagi SQL ketma-ket qo'llanadi — ma'lumot yo'qolmaydi.
 """
 
 from collections.abc import AsyncGenerator
+from pathlib import Path
 from typing import Any
 
 from sqlalchemy import event, text
@@ -21,10 +24,31 @@ from backend.app.core.telemetry import logger
 from backend.app.db.models import Base, SettingsModel
 from backend.app.usage.tracker import max_logged_run_id
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
+FIRST_MIGRATABLE_VERSION = 4  # bundan eski sxemalar qayta yaratiladi
+
+# {versiya: [SQL, ...]} — (versiya − 1) dan shu versiyaga o'tish. Masalan:
+# 5: ["ALTER TABLE runs ADD COLUMN note TEXT"],
+MIGRATIONS: dict[int, list[str]] = {}
+
+LEGACY_TABLES = (
+    "chat_messages", "layer_stats", "class_areas", "weather", "reports", "layers", "scenes", "runs", "users", "settings",
+)
+
+
+def _drop_stale_wal(db_path: str) -> None:
+    """Asosiy baza fayli qo'lda o'chirilgan bo'lsa, qolgan -wal/-shm fayllarini ham o'chiradi.
+
+    Aks holda SQLite yo'q bazaga tegishli eski WAL jurnalini yangi bo'sh bazaga qo'llashga urinadi.
+    """
+    if db_path == ":memory:" or Path(db_path).exists():
+        return
+    for suffix in ("-wal", "-shm", "-journal"):
+        Path(db_path + suffix).unlink(missing_ok=True)
 
 
 def _make_engine(url: str) -> AsyncEngine:
+    _drop_stale_wal(url.split("///", 1)[-1])
     eng = create_async_engine(url, echo=False, connect_args={"check_same_thread": False})
 
     @event.listens_for(eng.sync_engine, "connect")
@@ -54,25 +78,34 @@ def session_scope() -> AsyncSession:
     return async_session_maker()
 
 
+async def _create_fresh(conn: Any) -> None:
+    for tbl in LEGACY_TABLES:
+        await conn.execute(text(f"DROP TABLE IF EXISTS {tbl};"))
+    await conn.run_sync(Base.metadata.create_all)
+    await conn.execute(text(f"PRAGMA user_version = {SCHEMA_VERSION};"))
+    # Yangi baza: run ID lari jurnaldagi va diskdagi eski ID lar bilan to'qnashmasin
+    last_id = max_logged_run_id()
+    if last_id:
+        await conn.execute(text("INSERT INTO sqlite_sequence(name, seq) VALUES ('runs', :seq)"), {"seq": last_id})
+
+
 async def init_db() -> None:
-    """Jadvallarni yaratadi (sxema eskirgan bo'lsa qayta yaratadi) va sozlamalar qatorini kiritadi."""
+    """Jadvallarni yaratadi yoki migratsiya qiladi va sozlamalar qatorini kiritadi."""
     async with engine.begin() as conn:
         version = (await conn.execute(text("PRAGMA user_version;"))).scalar() or 0
-        if version != SCHEMA_VERSION:
+        if version < FIRST_MIGRATABLE_VERSION:
             if version != 0:
-                logger.warning(f"DB sxemasi eskirgan (v{version}); qayta yaratilmoqda.")
-            await conn.run_sync(Base.metadata.drop_all)
-            # Eski versiyadagi jadvallar ham o'chirilishi kerak
-            for tbl in ("layer_stats", "class_areas", "weather", "reports", "layers", "scenes", "runs", "settings"):
-                await conn.execute(text(f"DROP TABLE IF EXISTS {tbl};"))
+                logger.warning(f"DB sxemasi juda eski (v{version}); qayta yaratilmoqda.")
+            await _create_fresh(conn)
+        elif version < SCHEMA_VERSION:
+            for v in range(version + 1, SCHEMA_VERSION + 1):
+                for sql in MIGRATIONS.get(v, []):
+                    await conn.execute(text(sql))
+                await conn.execute(text(f"PRAGMA user_version = {v};"))
+                logger.info(f"DB migratsiyasi: v{v - 1} → v{v}")
+        else:
+            # Yangi qo'shilgan jadvallar (masalan, kelajakdagi) mavjud bo'lmasa yaratiladi
             await conn.run_sync(Base.metadata.create_all)
-            await conn.execute(text(f"PRAGMA user_version = {SCHEMA_VERSION};"))
-            # Yangi baza: run ID lari jurnaldagi eski ID lar bilan to'qnashmasin
-            last_id = max_logged_run_id()
-            if last_id:
-                await conn.execute(
-                    text("INSERT INTO sqlite_sequence(name, seq) VALUES ('runs', :seq)"), {"seq": last_id}
-                )
 
     async with session_scope() as session:
         row = await session.get(SettingsModel, 1)

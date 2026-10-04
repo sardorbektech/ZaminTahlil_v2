@@ -10,13 +10,17 @@ from collections.abc import AsyncGenerator
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 from fastapi import APIRouter, Depends, Query
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.app.ai.chat import ask_about_area, chat_history
 from backend.app.ai.report_generator import generate_report_for_run
+from backend.app.analysis.registry import get_analyzer
+from backend.app.auth.security import CurrentUser, current_user
 from backend.app.core import constants as C
 from backend.app.core.errors import (
     ConflictError,
@@ -29,6 +33,7 @@ from backend.app.core.time import fmt_local, ts_fields
 from backend.app.db.enums import (
     SENSOR_NAMES_UZ,
     WEATHER_SOURCE_KEYS,
+    ChatRole,
     JobStatus,
     QualityFlag,
     ReportStatus,
@@ -45,12 +50,14 @@ from backend.app.db.models import (
 )
 from backend.app.db.session import get_db, load_run_settings
 from backend.app.gee import datasets as D
+from backend.app.gee.gateway import CallContext
 from backend.app.pipeline import storage as st
 from backend.app.pipeline.deps import get_data_source, get_gateway
 from backend.app.pipeline.grid import Grid, normalize_aoi, validate_aoi
 from backend.app.pipeline.jobs import TERMINAL_EVENTS, job_manager
 from backend.app.pipeline.recon import create_run_row, make_runner
 from backend.app.pipeline.render import LAYER_SPECS, legend_for, render_composite_png
+from backend.app.pipeline.terrain3d import context_grid, label_points, terrain_payload
 
 router = APIRouter(prefix="/recon", tags=["Rekognossirovka"])
 
@@ -61,20 +68,30 @@ SSE_KEEPALIVE_S = 15.0
 
 class StartReconSchema(BaseModel):
     aoi: dict[str, Any]
+    name: str = ""
+
+
+class RenameSchema(BaseModel):
+    name: str
+
+
+class ChatSchema(BaseModel):
+    message: str
 
 
 # ---------------------------------------------------------------------------
 # Yordamchilar
 # ---------------------------------------------------------------------------
-async def _get_run(db: AsyncSession, run_id: int) -> RunModel:
+async def _get_run(db: AsyncSession, run_id: int, user: "CurrentUser") -> RunModel:
+    """Run faqat egasiga ko'rinadi (boshqa foydalanuvchiniki — 404)."""
     run = await db.get(RunModel, run_id)
-    if run is None:
-        raise NotFoundError(f"Rekognossirovka #{run_id} topilmadi.")
+    if run is None or run.user_id != user.id:
+        raise NotFoundError(f"Maydon #{run_id} topilmadi.")
     return run
 
 
-async def _get_completed_run(db: AsyncSession, run_id: int) -> RunModel:
-    run = await _get_run(db, run_id)
+async def _get_completed_run(db: AsyncSession, run_id: int, user: "CurrentUser") -> RunModel:
+    run = await _get_run(db, run_id, user)
     if run.status != JobStatus.COMPLETED:
         raise ConflictError("Rekognossirovka hali yakunlanmagan.", code="RUN_NOT_READY")
     return run
@@ -93,6 +110,12 @@ def _derived_key(layer: LayerModel) -> str:
     if layer.sensor == SensorKind.SMAP:
         return "smap"
     return f"{SensorKind(layer.sensor).name.lower()}_{layer.acq_time}"
+
+
+def _producer_out(producer: str) -> dict[str, str]:
+    """'usul:analizator:versiya' -> {method, analyzer, version} (UI'da Qoidaviy / ML / CV belgisi)."""
+    parts = (producer or "rules:formula:rules-1.0").split(":", 2) + ["", ""]
+    return {"method": parts[0], "analyzer": parts[1], "version": parts[2]}
 
 
 def _layer_out(run_id: int, layer: LayerModel) -> dict[str, Any]:
@@ -118,6 +141,7 @@ def _layer_out(run_id: int, layer: LayerModel) -> dict[str, Any]:
         "cloud_masked_pct": layer.cloud_masked_pct,
         "quality_flag": flag.name,
         "low_confidence": flag in (QualityFlag.LOW_CONFIDENCE, QualityFlag.NO_DATA),
+        "producer": _producer_out(layer.producer),
         "stats": None if stats is None else {
             "count": stats.count, "mean": stats.mean_val, "std": stats.std_val, "median": stats.median_val,
             "p10": stats.p10, "p90": stats.p90, "min": layer.min_val if not spec or spec.mode != "rgb" else None,
@@ -129,19 +153,26 @@ def _layer_out(run_id: int, layer: LayerModel) -> dict[str, Any]:
 # Vazifani boshqarish
 # ---------------------------------------------------------------------------
 @router.post("")
-async def start_reconnaissance(payload: StartReconSchema, db: AsyncSession = Depends(get_db)) -> dict[str, Any]:
+async def start_reconnaissance(payload: StartReconSchema, db: AsyncSession = Depends(get_db), user: CurrentUser = Depends(current_user)) -> dict[str, Any]:
     """Yangi rekognossirovkani fonda boshlaydi (faol vazifa bo'lsa 409)."""
     if job_manager.active_run_id() is not None:
         raise ConflictError()
     run_settings = await load_run_settings(db)
+    try:
+        get_analyzer(run_settings.landcover_analyzer)
+    except KeyError as e:
+        raise ValidationAppError(
+            f"Yer qoplami analizatori topilmadi: {run_settings.landcover_analyzer}", code="ANALYZER_NOT_FOUND"
+        ) from e
     aoi = normalize_aoi(payload.aoi)
     area = validate_aoi(aoi, run_settings.max_aoi_km2)
     source = get_data_source()
     if not source.is_configured():
         raise GEENotConfiguredError()
     job = await job_manager.start(
-        lambda: create_run_row(aoi, area, run_settings),
-        make_runner(aoi, area, run_settings, source, get_gateway()),
+        lambda: create_run_row(aoi, area, run_settings, user.id, payload.name),
+        make_runner(aoi, area, run_settings, source, get_gateway(), user_id=user.id),
+        owner_id=user.id,
     )
     return {
         "run_id": job.run_id,
@@ -152,17 +183,21 @@ async def start_reconnaissance(payload: StartReconSchema, db: AsyncSession = Dep
 
 
 @router.get("/active")
-async def get_active_recon(db: AsyncSession = Depends(get_db)) -> dict[str, Any]:
+async def get_active_recon(db: AsyncSession = Depends(get_db), user: CurrentUser = Depends(current_user)) -> dict[str, Any]:
     """Faol vazifa (sahifa qayta yuklanganda holatni tiklash uchun)."""
     rid = job_manager.active_run_id()
     if rid is None:
-        return {"active": False, "run": None}
+        return {"active": False, "busy": False, "run": None}
+    if job_manager.active_owner() != user.id:
+        # Server bir vaqtda bitta vazifa bajaradi; boshqa foydalanuvchiniki haqida tafsilot berilmaydi
+        return {"active": False, "busy": True, "run": None}
     run = await db.get(RunModel, rid)
     job = job_manager.get_job(rid)
     return {
         "active": True,
         "run": {
             "id": rid,
+            "name": run.name if run else "",
             "aoi": json.loads(run.aoi_geojson) if run else None,
             "area_km2": run.area_km2 if run else None,
             **ts_fields("created_at", run.created_at if run else None),
@@ -174,11 +209,13 @@ async def get_active_recon(db: AsyncSession = Depends(get_db)) -> dict[str, Any]
 
 
 @router.get("/{run_id}/events")
-async def stream_recon_events(run_id: int, db: AsyncSession = Depends(get_db)) -> StreamingResponse:
+async def stream_recon_events(run_id: int, db: AsyncSession = Depends(get_db), user: CurrentUser = Depends(current_user)) -> StreamingResponse:
     """SSE: vazifa hodisalari (tarixdan boshlab), yakuniy hodisada oqim yopiladi."""
     job = job_manager.get_job(run_id)
+    if job is not None and job.owner_id != user.id:
+        raise NotFoundError(f"Maydon #{run_id} topilmadi.")
     if job is None:
-        run = await _get_run(db, run_id)
+        run = await _get_run(db, run_id, user)
         ev_type = "done" if run.status == JobStatus.COMPLETED else "error"
         msg = "Rekognossirovka yakunlangan" if ev_type == "done" else (run.error_message or "Xatolik")
         final = {"seq": 0, "type": ev_type, "run_id": run_id, "stage": 10, "total_stages": 10,
@@ -210,8 +247,11 @@ async def stream_recon_events(run_id: int, db: AsyncSession = Depends(get_db)) -
 
 
 @router.post("/{run_id}/cancel")
-async def cancel_reconnaissance(run_id: int) -> dict[str, Any]:
+async def cancel_reconnaissance(run_id: int, user: CurrentUser = Depends(current_user)) -> dict[str, Any]:
     """Vazifani to'xtatadi va barcha resurslarni (fayllar, DB qatorlari, xotira) tozalaydi."""
+    job = job_manager.get_job(run_id)
+    if job is None or job.owner_id != user.id:
+        raise ConflictError("Bu rekognossirovka hozir bajarilmayapti.", code="RUN_NOT_ACTIVE")
     ok = await job_manager.cancel(run_id)
     if not ok:
         raise ConflictError("Bu rekognossirovka hozir bajarilmayapti.", code="RUN_NOT_ACTIVE")
@@ -222,9 +262,9 @@ async def cancel_reconnaissance(run_id: int) -> dict[str, Any]:
 # Natijalar
 # ---------------------------------------------------------------------------
 @router.get("/{run_id}")
-async def get_recon_summary(run_id: int, db: AsyncSession = Depends(get_db)) -> dict[str, Any]:
+async def get_recon_summary(run_id: int, db: AsyncSession = Depends(get_db), user: CurrentUser = Depends(current_user)) -> dict[str, Any]:
     """Run xulosasi: holat, hudud, to'r chegaralari, kuzatuv sanalari, hisobot holati."""
-    run = await _get_run(db, run_id)
+    run = await _get_run(db, run_id, user)
     grid = Grid.from_json(run.grid_json) if run.grid_json else None
     dates: list[dict[str, Any]] = []
     if run.status == JobStatus.COMPLETED:
@@ -247,6 +287,7 @@ async def get_recon_summary(run_id: int, db: AsyncSession = Depends(get_db)) -> 
         report = (await db.execute(select(ReportModel).where(ReportModel.fingerprint == run.fingerprint))).scalars().first()
     return {
         "id": run.id,
+        "name": run.name,
         "status": STATUS_NAMES.get(JobStatus(run.status), "unknown"),
         "area_km2": run.area_km2,
         "aoi": json.loads(run.aoi_geojson),
@@ -266,9 +307,9 @@ async def get_recon_summary(run_id: int, db: AsyncSession = Depends(get_db)) -> 
 
 
 @router.get("/{run_id}/layers")
-async def get_recon_layers(run_id: int, db: AsyncSession = Depends(get_db)) -> dict[str, Any]:
+async def get_recon_layers(run_id: int, db: AsyncSession = Depends(get_db), user: CurrentUser = Depends(current_user)) -> dict[str, Any]:
     """Qatlamlar: har biri vaqt, manba, sifat, afsona va statistika bilan."""
-    run = await _get_completed_run(db, run_id)
+    run = await _get_completed_run(db, run_id, user)
     from sqlalchemy.orm import selectinload
 
     layers = (await db.execute(
@@ -284,8 +325,9 @@ async def get_recon_layers(run_id: int, db: AsyncSession = Depends(get_db)) -> d
 
 
 @router.get("/{run_id}/layers/{layer_id}.png")
-async def get_layer_png(run_id: int, layer_id: int, db: AsyncSession = Depends(get_db)) -> FileResponse:
+async def get_layer_png(run_id: int, layer_id: int, db: AsyncSession = Depends(get_db), user: CurrentUser = Depends(current_user)) -> FileResponse:
     """Qatlamning shaffof PNG tasviri."""
+    await _get_run(db, run_id, user)
     layer = await db.get(LayerModel, layer_id)
     if layer is None or layer.run_id != run_id:
         raise NotFoundError("Qatlam topilmadi.")
@@ -302,10 +344,10 @@ async def get_custom_composite(
     r: str = Query("B4"),
     g: str = Query("B3"),
     b: str = Query("B2"),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db), user: CurrentUser = Depends(current_user),
 ) -> FileResponse:
     """Sentinel-2 bandlaridan ixtiyoriy R/G/B kompozit (2–98 persentil cho'zish)."""
-    await _get_completed_run(db, run_id)
+    await _get_completed_run(db, run_id, user)
     for band in (r, g, b):
         if band not in COMPOSITE_BANDS:
             raise ValidationAppError(
@@ -326,10 +368,10 @@ async def query_pixel_point(
     run_id: int,
     lon: float = Query(..., ge=-180, le=180),
     lat: float = Query(..., ge=-85, le=85),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_db), user: CurrentUser = Depends(current_user),
 ) -> dict[str, Any]:
     """Nuqtadagi barcha qiymatlar: har biri o'z vaqti, sensori, dataset va kadr ID'lari bilan."""
-    run = await _get_completed_run(db, run_id)
+    run = await _get_completed_run(db, run_id, user)
     grid = Grid.from_json(run.grid_json or "{}")
     rc = grid.pixel_of(lon, lat)
     if rc is None:
@@ -375,9 +417,9 @@ async def query_pixel_point(
 
 
 @router.get("/{run_id}/classes")
-async def get_class_distribution(run_id: int, db: AsyncSession = Depends(get_db)) -> dict[str, Any]:
+async def get_class_distribution(run_id: int, db: AsyncSession = Depends(get_db), user: CurrentUser = Depends(current_user)) -> dict[str, Any]:
     """Yer qoplami sinflari maydoni (har bir Sentinel-2 sanasi uchun)."""
-    await _get_completed_run(db, run_id)
+    await _get_completed_run(db, run_id, user)
     rows = (await db.execute(
         select(ClassAreaModel).where(ClassAreaModel.run_id == run_id).order_by(ClassAreaModel.acq_time, ClassAreaModel.class_code)
     )).scalars().all()
@@ -411,17 +453,17 @@ async def get_class_distribution(run_id: int, db: AsyncSession = Depends(get_db)
 
 
 @router.get("/{run_id}/changes")
-async def get_changes_summary(run_id: int, db: AsyncSession = Depends(get_db)) -> dict[str, Any]:
+async def get_changes_summary(run_id: int, db: AsyncSession = Depends(get_db), user: CurrentUser = Depends(current_user)) -> dict[str, Any]:
     """Ketma-ket haqiqiy kuzatuvlar orasidagi o'zgarishlar (ΔNDVI, ΔNDWI, ΔNDMI, ΔVV, Δ namlik, sinf o'tishlari)."""
-    await _get_completed_run(db, run_id)
+    await _get_completed_run(db, run_id, user)
     s = _summary(run_id)
     return {"run_id": run_id, **s.get("changes", {}), "cross_check": s.get("cross_check", [])}
 
 
 @router.get("/{run_id}/weather")
-async def get_weather_data(run_id: int, db: AsyncSession = Depends(get_db)) -> dict[str, Any]:
+async def get_weather_data(run_id: int, db: AsyncSession = Depends(get_db), user: CurrentUser = Depends(current_user)) -> dict[str, Any]:
     """O'tmish va prognoz ob-havo (manba va vaqt bilan), kunlik yog'in va ta'sir xulosalari."""
-    await _get_completed_run(db, run_id)
+    await _get_completed_run(db, run_id, user)
     rows = (await db.execute(select(WeatherModel).where(WeatherModel.run_id == run_id).order_by(WeatherModel.ts))).scalars().all()
 
     def rec(r: WeatherModel) -> dict[str, Any]:
@@ -453,9 +495,9 @@ async def get_weather_data(run_id: int, db: AsyncSession = Depends(get_db)) -> d
 
 
 @router.get("/{run_id}/satellites")
-async def get_satellite_provenance(run_id: int, db: AsyncSession = Depends(get_db)) -> dict[str, Any]:
+async def get_satellite_provenance(run_id: int, db: AsyncSession = Depends(get_db), user: CurrentUser = Depends(current_user)) -> dict[str, Any]:
     """Har bir sun'iy yo'ldosh nima bergani va qachon: kadrlar, kuzatuvlar, bandlar, sifat."""
-    await _get_completed_run(db, run_id)
+    await _get_completed_run(db, run_id, user)
     scenes = (await db.execute(select(SceneModel).where(SceneModel.run_id == run_id).order_by(SceneModel.acq_time))).scalars().all()
     s = _summary(run_id)
     obs_q = {o["key"]: o for o in s.get("observations", [])}
@@ -497,9 +539,9 @@ def _report_out(run_id: int, rep: ReportModel) -> dict[str, Any]:
 
 
 @router.get("/{run_id}/report")
-async def get_ai_report(run_id: int, db: AsyncSession = Depends(get_db)) -> dict[str, Any]:
+async def get_ai_report(run_id: int, db: AsyncSession = Depends(get_db), user: CurrentUser = Depends(current_user)) -> dict[str, Any]:
     """AI hisobotini o'qish (barmoq izi bo'yicha)."""
-    run = await _get_completed_run(db, run_id)
+    run = await _get_completed_run(db, run_id, user)
     rep = (await db.execute(select(ReportModel).where(ReportModel.fingerprint == run.fingerprint))).scalars().first()
     if rep is None:
         raise NotFoundError("Hisobot hali tayyorlanmagan.")
@@ -507,14 +549,191 @@ async def get_ai_report(run_id: int, db: AsyncSession = Depends(get_db)) -> dict
 
 
 @router.post("/{run_id}/report")
-async def generate_ai_report_endpoint(run_id: int, db: AsyncSession = Depends(get_db)) -> dict[str, Any]:
+async def generate_ai_report_endpoint(run_id: int, db: AsyncSession = Depends(get_db), user: CurrentUser = Depends(current_user)) -> dict[str, Any]:
     """AI hisobotini yaratish. Barmoq izi uchun muvaffaqiyatli hisobot bo'lsa — 409."""
     if job_manager.active_run_id() is not None:
         raise ConflictError()
-    run = await _get_completed_run(db, run_id)
+    run = await _get_completed_run(db, run_id, user)
     run_settings: RunSettings = await load_run_settings(db)
     rep = await generate_report_for_run(db, run, _summary(run_id), run_settings)
     return _report_out(run_id, rep)
 
 
+# ---------------------------------------------------------------------------
+# Saqlangan maydonlar: ro'yxat, nomlash, o'chirish
+# ---------------------------------------------------------------------------
+@router.get("")
+async def list_my_areas(db: AsyncSession = Depends(get_db), user: CurrentUser = Depends(current_user)) -> dict[str, Any]:
+    """Foydalanuvchining saqlangan maydonlari (yangilari birinchi)."""
+    runs = (await db.execute(
+        select(RunModel).where(RunModel.user_id == user.id).order_by(RunModel.id.desc())
+    )).scalars().all()
+    out = []
+    for r in runs:
+        dates = 0
+        if r.status == JobStatus.COMPLETED:
+            dates = len((await db.execute(
+                select(LayerModel.acq_time).where(
+                    LayerModel.run_id == r.id,
+                    LayerModel.sensor.in_([SensorKind.SENTINEL2, SensorKind.SENTINEL1, SensorKind.LANDSAT]),
+                ).distinct()
+            )).all())
+        out.append({
+            "id": r.id,
+            "name": r.name,
+            "status": STATUS_NAMES.get(JobStatus(r.status), "unknown"),
+            "area_km2": r.area_km2,
+            "aoi": json.loads(r.aoi_geojson),
+            **ts_fields("created_at", r.created_at),
+            **ts_fields("completed_at", r.completed_at),
+            "observation_dates": dates,
+            "error": r.error_message,
+        })
+    return {"areas": out}
+
+
+@router.patch("/{run_id}")
+async def rename_area(
+    run_id: int, payload: RenameSchema, db: AsyncSession = Depends(get_db), user: CurrentUser = Depends(current_user)
+) -> dict[str, Any]:
+    """Maydon nomini o'zgartiradi."""
+    run = await _get_run(db, run_id, user)
+    name = payload.name.strip()
+    if not name or len(name) > 120:
+        raise ValidationAppError("Nom 1–120 belgidan iborat boʻlishi kerak.", code="INVALID_NAME")
+    run.name = name
+    await db.commit()
+    return {"id": run_id, "name": name, "message_uz": "Nom saqlandi"}
+
+
+@router.delete("/{run_id}")
+async def delete_area(run_id: int, db: AsyncSession = Depends(get_db), user: CurrentUser = Depends(current_user)) -> dict[str, Any]:
+    """Saqlangan maydonni (fayllari, natijalari, hisobot va suhbati bilan) butunlay o'chiradi."""
+    run = await _get_run(db, run_id, user)
+    if job_manager.active_run_id() == run_id:
+        raise ConflictError("Bajarilayotgan vazifani avval toʻxtating.", code="RUN_ACTIVE")
+    await db.delete(run)
+    await db.commit()
+    st.delete_run_dir(run_id)
+    return {"id": run_id, "deleted": True, "message_uz": "Maydon oʻchirildi"}
+
+
+# ---------------------------------------------------------------------------
+# 3D ko'rinish va nomlar
+# ---------------------------------------------------------------------------
+@router.get("/{run_id}/terrain3d")
+async def get_terrain3d(
+    run_id: int,
+    scope: str = Query("context", pattern="^(context|aoi)$"),
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(current_user),
+) -> dict[str, Any]:
+    """3D relyef (Copernicus DEM). scope=context — AOI atrofi bilan (birinchi so'rovda GEE dan olinadi va keshlanadi),
+    scope=aoi — faqat tahlil to'ri. Kichraytirishda blok o'rtachasi olinadi."""
+    run = await _get_completed_run(db, run_id, user)
+    if not run.grid_json:
+        raise NotFoundError("Bu maydon uchun relyef (DEM) maʼlumoti yoʻq.")
+    aoi_grid = Grid.from_json(run.grid_json)
+    if scope == "context":
+        grid = context_grid(aoi_grid)
+        raw = st.raw_path(run_id, "dem_context")
+        if not raw.exists():
+            source = get_data_source()
+            if not source.is_configured():
+                raise GEENotConfiguredError()
+            ctx = CallContext(run_id=run_id)
+            arrays = await source.download_dem_context(grid, ctx)
+            if not arrays:
+                raise NotFoundError("Atrof uchun relyef (DEM) topilmadi.")
+            await asyncio.to_thread(st.save_arrays, raw, arrays)
+        max_side = C.CONTEXT3D_MAX_SIDE
+    else:
+        grid, raw, max_side = aoi_grid, st.raw_path(run_id, "dem"), C.TERRAIN3D_MAX_SIDE
+    if not raw.exists():
+        raise NotFoundError("Bu maydon uchun relyef (DEM) maʼlumoti yoʻq.")
+    dem = (await asyncio.to_thread(st.load_arrays, raw, [D.DEM_BAND]))[D.DEM_BAND]
+    try:
+        payload = await asyncio.to_thread(terrain_payload, dem, grid, max_side)
+    except ValueError as e:
+        raise NotFoundError("Relyef qiymatlari yoʻq.") from e
+    payload["scope"] = scope
+    payload["aoi_grid_bounds_latlon"] = aoi_grid.bounds_latlon()  # qatlam PNG lari aynan shu chegarada
+    payload["resolution_m"] = round(grid.res_m, 1)
+    dem_layer = (await db.execute(
+        select(LayerModel).where(LayerModel.run_id == run_id, LayerModel.name == "elevation")
+    )).scalars().first()
+    return {
+        "run_id": run_id,
+        **payload,
+        "aoi": json.loads(run.aoi_geojson),
+        "dataset": D.DEM_COLLECTION,
+        **ts_fields("acq_time", dem_layer.acq_time if dem_layer else None),
+    }
+
+
+@router.get("/{run_id}/labels")
+async def get_landcover_labels(run_id: int, db: AsyncSession = Depends(get_db), user: CurrentUser = Depends(current_user)) -> dict[str, Any]:
+    """Har bir Sentinel-2 sanasi uchun yer qoplami nomlari qo'yiladigan nuqtalar (2D va 3D uchun)."""
+    run = await _get_completed_run(db, run_id, user)
+    cache = st.run_dir(run_id) / "labels.json"
+    if cache.exists():
+        return st.load_json(cache)
+    grid = Grid.from_json(run.grid_json or "{}")
+    times = sorted({t for (t,) in (await db.execute(
+        select(LayerModel.acq_time).where(LayerModel.run_id == run_id, LayerModel.name == "landcover")
+    )).all()})
+    row_area = grid.row_pixel_area_m2()
+    dates = []
+    for t in times:
+        dp = st.derived_path(run_id, f"{SensorKind.SENTINEL2.name.lower()}_{t}")
+        if not dp.exists():
+            continue
+        lc = (await asyncio.to_thread(st.load_arrays, dp, ["landcover"]))["landcover"]
+        classes = np.nan_to_num(lc, nan=0).astype(np.uint8)
+        pts = await asyncio.to_thread(label_points, classes, grid, row_area)
+        dates.append({**ts_fields("acq_time", t), "labels": pts})
+    out = {"run_id": run_id, "source": D.S2_COLLECTION, "dates": dates}
+    await asyncio.to_thread(st.save_json, cache, out)
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Maydon haqidagi AI suhbat
+# ---------------------------------------------------------------------------
+def _msg_out(m: Any) -> dict[str, Any]:
+    return {
+        "id": m.id,
+        "role": "user" if m.role == ChatRole.USER else "assistant",
+        "content": m.content,
+        "model": m.model,
+        **ts_fields("created_at", m.created_at),
+    }
+
+
+@router.get("/{run_id}/chat")
+async def get_chat(run_id: int, db: AsyncSession = Depends(get_db), user: CurrentUser = Depends(current_user)) -> dict[str, Any]:
+    await _get_run(db, run_id, user)
+    return {"run_id": run_id, "messages": [_msg_out(m) for m in await chat_history(db, run_id)]}
+
+
+@router.post("/{run_id}/chat")
+async def post_chat(
+    run_id: int, payload: ChatSchema, db: AsyncSession = Depends(get_db), user: CurrentUser = Depends(current_user)
+) -> dict[str, Any]:
+    """Maydon haqida savol. AI faqat shu maydon haqida javob beradi."""
+    run = await _get_completed_run(db, run_id, user)
+    um, am = await ask_about_area(db, run, _summary(run_id), payload.message, await load_run_settings(db))
+    return {"run_id": run_id, "question": _msg_out(um), "answer": _msg_out(am)}
+
+
+@router.delete("/{run_id}/chat")
+async def clear_chat(run_id: int, db: AsyncSession = Depends(get_db), user: CurrentUser = Depends(current_user)) -> dict[str, Any]:
+    await _get_run(db, run_id, user)
+    for m in await chat_history(db, run_id):
+        await db.delete(m)
+    await db.commit()
+    return {"run_id": run_id, "cleared": True}
+
+
 __all__ = ["router", "fmt_local"]
+

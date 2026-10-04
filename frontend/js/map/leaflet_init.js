@@ -3,6 +3,7 @@
 let map = null;
 let aoiLayer = null;
 let onAoi = null;
+let pendingFit = null; // xarita oʻlchami 0 boʻlganda kechiktirilgan fitBounds
 
 const AOI_STYLE = { color: "#38bdf8", weight: 2, fillColor: "#38bdf8", fillOpacity: 0.08 };
 
@@ -22,7 +23,21 @@ export function initMap(onAoiChanged, onMapClick) {
     e.layer.on("pm:edit", () => onAoi?.(geometry()));
   });
   map.on("click", (e) => onMapClick?.(e));
+  // Konteyner oʻlchami oʻzgarsa (yoki sahifa yashirin holatda yuklangan boʻlsa) — xaritani qayta oʻlchash
+  new ResizeObserver(() => {
+    map.invalidateSize();
+    if (pendingFit && hasRealSize()) {
+      map.fitBounds(pendingFit, { padding: [30, 30] });
+      pendingFit = null;
+    }
+  }).observe(document.getElementById("map"));
   return map;
+}
+
+/** Xarita koʻrinadigan oʻlchamga egami (yashirin sahifada 0 yoki bir necha piksel boʻlishi mumkin). */
+function hasRealSize() {
+  const sz = map.getSize();
+  return sz.x >= 100 && sz.y >= 100;
 }
 
 function setAoiLayer(layer) {
@@ -53,7 +68,10 @@ export function showAoi(geom, fit = true) {
   layer.addTo(map);
   if (aoiLayer && aoiLayer !== layer) map.removeLayer(aoiLayer);
   aoiLayer = layer;
-  if (fit) map.fitBounds(layer.getBounds(), { padding: [30, 30] });
+  if (!fit) return;
+  map.invalidateSize();
+  if (hasRealSize()) map.fitBounds(layer.getBounds(), { padding: [30, 30] });
+  else pendingFit = layer.getBounds();
 }
 
 export function getMap() {

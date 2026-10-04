@@ -80,6 +80,7 @@ class LayerKind(IntEnum):
     LANDSAT_NDVI = 38
     CLASS_CHANGE = 39
     DELTA_NBR = 40
+    MODEL_OUTPUT = 41  # ML/CV modeli qatlami (nomi bo'yicha farqlanadi)
 
 
 class WeatherSource(IntEnum):
@@ -114,3 +115,10 @@ class ReportStatus(IntEnum):
 
     OK = 1
     FAILED = 2
+
+
+class ChatRole(IntEnum):
+    """Suhbat xabari muallifi."""
+
+    USER = 1
+    ASSISTANT = 2

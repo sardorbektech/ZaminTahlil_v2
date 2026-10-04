@@ -27,7 +27,7 @@ class AIProvider(Protocol):
     def is_configured(self) -> bool: ...
 
     async def complete(
-        self, messages: list[Message], model: str, run_id: int | None
+        self, messages: list[Message], model: str, run_id: int | None, purpose: str = "report_generation"
     ) -> str: ...
 
 
@@ -50,7 +50,13 @@ class _BaseHTTPProvider:
     def _parse(self, data: dict[str, Any]) -> tuple[str, int | None, int | None, float | None]:
         raise NotImplementedError
 
-    async def complete(self, messages: list[Message], model: str, run_id: int | None) -> str:
+    def _drop_unsupported(self, body: str) -> bool:
+        """HTTP 400 javobida qo'llab-quvvatlanmaydigan parametr bo'lsa uni olib tashlaydi (True — qayta urinish)."""
+        return False
+
+    async def complete(
+        self, messages: list[Message], model: str, run_id: int | None, purpose: str = "report_generation"
+    ) -> str:
         start = time.perf_counter()
         status, err, content = "success", None, ""
         tokens_in = tokens_out = None
@@ -59,10 +65,13 @@ class _BaseHTTPProvider:
         try:
             async with self._client_factory() as client:
                 # Umumiy muddat: provayder keep-alive bo'shliqlari yuborsa ham so'rov cheksiz cho'zilmasin
-                resp = await asyncio.wait_for(
-                    client.post(self._url(), headers=self._headers(), json=self._payload(messages, model)),
-                    timeout=self.timeout_s,
-                )
+                for _attempt in range(2):
+                    resp = await asyncio.wait_for(
+                        client.post(self._url(), headers=self._headers(), json=self._payload(messages, model)),
+                        timeout=self.timeout_s,
+                    )
+                    if not (resp.status_code == 400 and self._drop_unsupported(resp.text)):
+                        break
                 nbytes = len(resp.content)
                 if resp.status_code >= 400:
                     raise AIReportError(
@@ -89,7 +98,7 @@ class _BaseHTTPProvider:
                 run_id=run_id,
                 service=self.name,
                 operation="chat/completions",
-                purpose="report_generation",
+                purpose=purpose,
                 dataset=model,
                 request=f"model={model}, messages={len(messages)}",
                 status=status,
@@ -111,9 +120,17 @@ class OpenAICompatibleProvider(_BaseHTTPProvider):
         self.name = name
         self._base_url = base_url
         self._key_getter = key_getter
+        self._send_temperature = True
 
     def is_configured(self) -> bool:
         return bool(self._key_getter())
+
+    def _drop_unsupported(self, body: str) -> bool:
+        # Reasoning modellari (masalan, gpt-6-luna) temperature ni qabul qilmasligi mumkin
+        if self._send_temperature and "temperature" in body.lower():
+            self._send_temperature = False
+            return True
+        return False
 
     def _url(self) -> str:
         return f"{self._base_url}/chat/completions"
@@ -125,7 +142,10 @@ class OpenAICompatibleProvider(_BaseHTTPProvider):
         return h
 
     def _payload(self, messages: list[Message], model: str) -> dict[str, Any]:
-        return {"model": model, "messages": messages, "temperature": 0.1}
+        payload: dict[str, Any] = {"model": model, "messages": messages}
+        if self._send_temperature:
+            payload["temperature"] = 0.1
+        return payload
 
     def _parse(self, data: dict[str, Any]) -> tuple[str, int | None, int | None, float | None]:
         choices = data.get("choices") or []
@@ -206,6 +226,15 @@ class AIClient:
         del hist[:-history_size]
         logger.info(f"AI hisobot tayyor ({provider}/{model}, {len(content)} belgi)")
         return content
+
+    async def chat(self, provider: str, model: str, messages: list[Message], run_id: int | None = None) -> str:
+        """Tayyor xabarlar ro'yxati bilan bitta so'rov (maydon haqidagi suhbat uchun)."""
+        p = self.providers.get(provider)
+        if p is None:
+            raise AIReportError(f"Nomaʼlum AI provayderi: {provider}", code="AI_PROVIDER_UNKNOWN")
+        if not p.is_configured():
+            raise AIReportError(f"{provider} uchun API kaliti .env faylida sozlanmagan.", code="AI_NOT_CONFIGURED")
+        return await p.complete(messages, model, run_id, purpose="area_chat")
 
     def forget(self, history_key: str) -> None:
         self._history.pop(history_key, None)

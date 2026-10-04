@@ -18,9 +18,29 @@ DEFAULT_MAX_AOI_KM2 = 100.0
 DEFAULT_GEE_REQUEST_TIMEOUT_S = 60
 DEFAULT_GEE_MAX_RETRIES = 3
 DEFAULT_GEE_MAX_CONCURRENCY = 6
-DEFAULT_AI_PROVIDER = "openrouter"
-DEFAULT_AI_MODEL = "openrouter/free"
+DEFAULT_AI_PROVIDER = "openai"
+DEFAULT_AI_MODEL = "gpt-6-luna"
 DEFAULT_AI_HISTORY_SIZE = 10
+DEFAULT_LANDCOVER_ANALYZER = "landcover"  # registrdagi nom; ML/CV modeli bilan almashtirish mumkin
+
+# Foydalanuvchilar
+USERNAME_MAX_LEN = 64
+PASSWORD_MAX_LEN = 256
+PBKDF2_ITERATIONS = 200_000
+
+# Chat
+CHAT_MAX_MESSAGE_LEN = 2000
+CHAT_OFF_TOPIC_UZ = "Men faqat shu maydon va uning tahlil natijalari haqidagi savollarga javob beraman."
+
+# 3D ko'rinish
+TERRAIN3D_MAX_SIDE = 384  # 3D to'r tomonidagi maksimal nuqtalar soni (faqat maydon)
+CONTEXT3D_MAX_SIDE = 512  # atrof bilan 3D to'r tomonidagi maksimal piksellar
+CONTEXT3D_MIN_PAD_M = 1500.0  # AOI atrofida har tomondan kamida shuncha metr
+CONTEXT3D_MAX_SIDE_M = 40_000.0  # atrof hududining maksimal tomoni (metr)
+CONTEXT3D_DEM_RES_M = 30.0  # Copernicus GLO-30 asl aniqligi
+LABEL_MAX_PER_CLASS = 2  # har bir sinf uchun ko'pi bilan nechta yozuv
+LABEL_MIN_AOI_FRACTION = 0.005  # bo'lak AOI ning kamida shuncha ulushi bo'lsa nom qo'yiladi
+LABEL_MIN_PIXELS = 40  # yozuv qo'yiladigan komponentning minimal o'lchami
 
 # Sozlamalar uchun ruxsat etilgan oraliqlar
 LOOKBACK_DAYS_RANGE = (1, 60)

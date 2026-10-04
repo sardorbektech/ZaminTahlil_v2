@@ -1,6 +1,7 @@
 """Umumiy test sozlamalari: vaqtinchalik ma'lumot katalogi, alohida SQLite, soxta GEE va AI, tarmoq bloki."""
 
 import asyncio
+import base64
 import os
 import tempfile
 
@@ -16,6 +17,7 @@ import pytest  # noqa: E402
 import pytest_asyncio  # noqa: E402
 from httpx import ASGITransport, AsyncClient  # noqa: E402
 
+from backend.app.ai import chat as chat_module  # noqa: E402
 from backend.app.ai import report_generator  # noqa: E402
 from backend.app.core import config  # noqa: E402
 from backend.app.core.time import now_ts  # noqa: E402
@@ -50,6 +52,7 @@ async def isolated_env(tmp_path: Any, monkeypatch: pytest.MonkeyPatch, fake_ai: 
 
     monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", _no_network)
     monkeypatch.setattr(report_generator, "ai_client", fake_ai)
+    monkeypatch.setattr(chat_module, "ai_client", fake_ai)
 
     db.configure_engine(f"sqlite+aiosqlite:///{tmp_path / 'test.sqlite'}")
     await db.init_db()
@@ -62,10 +65,31 @@ async def isolated_env(tmp_path: Any, monkeypatch: pytest.MonkeyPatch, fake_ai: 
     await db.engine.dispose()
 
 
+def basic(username: str, password: str) -> dict[str, str]:
+    """HTTP Basic sarlavhasi (UTF-8)."""
+    token = base64.b64encode(f"{username}:{password}".encode()).decode()
+    return {"Authorization": f"Basic {token}"}
+
+
+async def make_client(username: str = "tester", password: str = "p") -> AsyncClient:
+    ac = AsyncClient(transport=ASGITransport(app=app), base_url="http://test", headers=basic(username, password))
+    r = await ac.post("/api/v1/auth/login", json={"username": username, "password": password})
+    assert r.status_code == 200, r.text
+    return ac
+
+
 @pytest_asyncio.fixture
 async def client() -> AsyncGenerator[AsyncClient, None]:
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+    ac = await make_client()
+    try:
+        yield ac
+    finally:
+        await ac.aclose()
+
+
+@pytest_asyncio.fixture
+async def anon() -> AsyncGenerator[AsyncClient, None]:
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
         yield ac
 
 

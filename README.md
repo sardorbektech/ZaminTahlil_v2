@@ -76,3 +76,15 @@ Linter va format tekshiruvi:
 - `frontend/` — Leaflet asosidagi statik interfeys (HTML/CSS/JS)
 - `tests/` — Tarmoqsiz testlar (soxta GEE manbasi `tests/fakes.py`)
 - `docs/DECISIONS.md` — SIMPLE.md da yozilmagan texnik qarorlar
+
+---
+
+## 6. Asosiy imkoniyatlar
+
+- **Kirish:** username + parol (roʻyxatdan oʻtish yoʻq — username boʻlmasa yangisi yaratiladi). Har kim faqat oʻz maydonlarini koʻradi.
+- **Maydonlarim:** tahlil qilingan maydonlar ID va nom bilan saqlanadi; istalgan vaqtda qayta ochish, nomlash, oʻchirish mumkin.
+- **2D / 3D:** Leaflet xaritasi yoki Three.js 3D relyef (Copernicus DEM) — ikkalasida ham yer qoplami ranglari, nomlari va istalgan qatlamlar.
+- **Kuzatuv sanasi:** slayder haqiqiy sanalar orasida qatlamlarni silliq almashtiradi.
+- **Chat:** AI (standart: OpenAI `gpt-6-luna`) faqat tanlangan maydon haqidagi savollarga javob beradi.
+- **ML/CV:** qatlamlar uchun klassik ML va computer vision modellarini ulash nuqtasi — `backend/app/analysis/models/`.
+- Texnik tavsif: `ABOUT.md`; agentlar uchun qoidalar: `AGENTS.md`; qarorlar: `docs/DECISIONS.md`.

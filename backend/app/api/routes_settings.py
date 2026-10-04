@@ -7,6 +7,8 @@ from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.ai.client import ai_client
+from backend.app.analysis.registry import landcover_choices
+from backend.app.auth.security import CurrentUser, current_user
 from backend.app.core import constants as C
 from backend.app.core.errors import ConflictError, ValidationAppError
 from backend.app.core.run_settings import SETTINGS_FIELDS, RunSettings, RunSettingsUpdate
@@ -32,6 +34,7 @@ FIELD_LABELS_UZ = {
     "ai_provider": "AI provayderi",
     "ai_model": "AI modeli",
     "ai_history_size": "AI xabarlar tarixi",
+    "landcover_analyzer": "Yer qoplami analizatori",
 }
 
 
@@ -52,7 +55,12 @@ def _out(s: RunSettings) -> dict[str, Any]:
             "gee_max_concurrency": C.GEE_CONCURRENCY_RANGE,
             "ai_history_size": C.AI_HISTORY_RANGE,
         },
-        "choices": {"s1_orbit_pass": C.S1_ORBIT_PASS_VALUES, "ai_provider": C.AI_PROVIDERS},
+        "choices": {
+            "s1_orbit_pass": C.S1_ORBIT_PASS_VALUES,
+            "ai_provider": C.AI_PROVIDERS,
+            "landcover_analyzer": [c["name"] for c in landcover_choices()],
+        },
+        "analyzers": landcover_choices(),
         "configured": {
             "gee_primary": is_role_configured(PRIMARY),
             "gee_secondary": is_role_configured(SECONDARY),
@@ -62,13 +70,17 @@ def _out(s: RunSettings) -> dict[str, Any]:
 
 
 @router.get("")
-async def get_system_settings(db: AsyncSession = Depends(get_db)) -> dict[str, Any]:
+async def get_system_settings(
+    db: AsyncSession = Depends(get_db), _user: CurrentUser = Depends(current_user)
+) -> dict[str, Any]:
     """Joriy sozlamalar, ruxsat etilgan oraliqlar va qaysi xizmatlar sozlanganligi (kalitlarsiz)."""
     return _out(await load_run_settings(db))
 
 
 @router.put("")
-async def update_system_settings(payload: RunSettingsUpdate, db: AsyncSession = Depends(get_db)) -> dict[str, Any]:
+async def update_system_settings(
+    payload: RunSettingsUpdate, db: AsyncSession = Depends(get_db), _user: CurrentUser = Depends(current_user)
+) -> dict[str, Any]:
     """Sozlamalarni qisman yangilaydi (tekshiruv bilan). Vazifa bajarilayotganda — 409."""
     if job_manager.active_run_id() is not None:
         raise ConflictError("Vazifa bajarilayotganda sozlamalarni oʻzgartirib boʻlmaydi.")
@@ -81,6 +93,8 @@ async def update_system_settings(payload: RunSettingsUpdate, db: AsyncSession = 
         raise ValidationAppError(
             f"Notoʻgʻri qiymat: {FIELD_LABELS_UZ.get(field, field)}", code="INVALID_SETTINGS"
         ) from e
+    if new.landcover_analyzer not in {c["name"] for c in landcover_choices()}:
+        raise ValidationAppError("Bunday yer qoplami analizatori roʻyxatda yoʻq.", code="INVALID_SETTINGS")
     row = await db.get(SettingsModel, 1)
     if row is None:
         row = SettingsModel(id=1, **new.model_dump())

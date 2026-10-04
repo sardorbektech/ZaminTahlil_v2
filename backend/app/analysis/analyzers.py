@@ -219,10 +219,16 @@ class SoilMoistureAnalyzer:
 
 
 class LandcoverAnalyzer:
-    """Qoidaviy yer qoplami (§7.4) va har bir piksel uchun ishonchlilik."""
+    """Qoidaviy yer qoplami (§7.4) va har bir piksel uchun ishonchlilik.
+
+    Slot "landcover": sozlamalardagi `landcover_analyzer` orqali ML/CV modeli bilan almashtiriladi.
+    """
 
     name = "landcover"
     version = VERSION
+    method = "rules"
+    stage = "s2_observation"
+    slot = "landcover"
 
     def run(self, data: AnalyzerInput) -> AnalyzerOutput:
         a, ex = data.arrays, data.extra
@@ -287,7 +293,7 @@ class ChangeAnalyzer:
 
 
 def init_all_analyzers() -> None:
-    """Barcha analizatorlarni registrga kiritadi."""
+    """Barcha analizatorlarni (qoidaviy va yoqilgan ML/CV modellarini) registrga kiritadi."""
     for an in (
         IndicesAnalyzer(),
         RGBAnalyzer(),
@@ -299,3 +305,9 @@ def init_all_analyzers() -> None:
         ChangeAnalyzer(),
     ):
         register_analyzer(an)
+    import importlib
+
+    from backend.app.analysis.models import ENABLED_MODELS
+
+    for mod in ENABLED_MODELS:  # har bir modul import qilinganda o'zini register_model() bilan qo'shadi
+        importlib.import_module(mod)

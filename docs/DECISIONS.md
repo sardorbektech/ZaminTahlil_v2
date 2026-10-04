@@ -83,3 +83,37 @@ All IDs and band names live in `backend/app/gee/datasets/__init__.py`.
 
 ## 19. Secrets
 - **Decision:** `.env` holds GEE project IDs, key file paths and AI keys; `secrets/` (service-account JSON) and `.env` are git-ignored. `.env.example` contains no values. `GET /settings` only returns booleans saying which services are configured.
+
+## 20. Saved areas instead of 24-hour retention (user request, 05.10.2026)
+- **Decision:** Completed runs are the user's saved areas (ID + name). They are never purged automatically and are deleted only by the owner (`DELETE /recon/{id}`). Failed runs are still purged after 24 h, API logs after 30 days. This overrides SIMPLE.md §6 "Retention".
+- **Reason:** the user wants to reopen previously analysed areas at any time.
+
+## 21. Users: username + password, no tokens (user request)
+- **Decision:** HTTP Basic credentials on every request; `POST /auth/login` creates unknown usernames (≥ 1 character) and verifies known ones. Passwords are PBKDF2-HMAC-SHA256 (200 000 iterations, random salt). The browser keeps credentials in `sessionStorage` (cleared when the tab closes) and re-sends `/auth/login` once after a 401, so deleting the DB file recreates the user transparently. Settings are global (one row) and editable by any logged-in user. The single-job limit stays global (one GEE pipeline at a time); other users see `busy: true` but no details.
+- **Fingerprint** includes the user ID, so de-duplication and "one report per fingerprint" are per user.
+
+## 22. Database survives manual deletion; migrations from v4 on
+- **Decision:** A missing DB file is recreated at startup (stale `-wal/-shm/-journal` files are removed first). Orphan run folders are deleted. Completed runs whose `summary.json` is missing are dropped. The `runs` sequence is seeded from the largest `run_id` in the usage logs. Schema v4 is the first version that is migrated instead of rebuilt (`db/session.py::MIGRATIONS`). The upgrade from v3 rebuilt the DB once (old runs had no owner).
+
+## 23. 3D view (user request; overrides SIMPLE.md §13 "3D terrain")
+- **Decision:** Three.js r160 from jsDelivr (import map). The relief is the run's Copernicus DEM (GLO30_2024_1, 30 m) for the whole grid, block-averaged to ≤ 384 points per side — no interpolation beyond the bilinear resampling GEE already applied. No extra satellite is needed: Copernicus GLO-30 is the most accurate free global DEM in the catalog at this scale. The texture is Esri World Imagery tiles (CORS-enabled) plus the same visible layers as in 2D, so 3D always shows exactly what 2D shows. Without Esri (CORS failure) only the layers are drawn and a note is shown. Labels use the backend-computed class components (`/labels`).
+
+## 24. Smooth date transitions
+- **Decision:** The date slider is continuous. Between two real dates each layer cross-fades between its own observations ("over" compositing: the older image stays, the newer one fades in on top, so there is no mid-transition dimming). On release it eases to the nearest real date in 600 ms. All images of visible layers are prefetched. This is a visual cross-fade only; no intermediate values are computed.
+
+## 25. AI defaults and area chat (user request)
+- **Decision:** Default provider `openai`, model `gpt-6-luna` (verified to exist via `/v1/models` on 05.10.2026; ~18 s per report). OpenRouter and Ollama remain selectable. If a model rejects `temperature`, the request is repeated without it. Prompts require Latin-script Uzbek only (the model occasionally mixed in Cyrillic words). The area chat (`/recon/{id}/chat`) sends a system prompt that restricts answers to this area's results and returns a fixed refusal otherwise, then the compact summary and the last `ai_history_size` messages. This overrides SIMPLE.md §8 "no chat UI".
+
+## 26. ML / CV extension point for layers
+- **Decision:** `analysis/models/` defines `PixelModelAnalyzer` (classic ML on per-pixel feature vectors) and `ImageModelAnalyzer` (CV on C×H×W tensors). Models register their analyzer and layer specs with `register_model()`. Slot `extra` adds layers; slot `landcover` replaces the rule-based classifier via the `landcover_analyzer` setting. Every layer stores `producer = method:analyzer:version`, shown as a badge in the UI. No model ships yet; `ENABLED_MODELS` lists the modules to import.
+
+## 27. Robust pagination and map sizing
+- **Decision:** Paginated containers re-measure with a `ResizeObserver` on the page body, and the map defers `fitBounds` until it is at least 100×100 px. Pages loaded in a hidden tab otherwise measured 0 px.
+
+## 28. Menu panels scroll instead of paging (user request, 05.10.2026)
+- **Decision:** The right-hand panel tabs, the chat and the "Maydonlarim" dialog use internal vertical scrolling (thin visible scrollbar). The page itself still never scrolls (`overflow: hidden` on `html/body/#app`), and the map pixel popup keeps its compact pager. `paginate.js` keeps its API (`keepPage` keeps the scroll position, `lastPage` scrolls to the end). This partially overrides SIMPLE.md §12 "no scrolling anywhere". Decision 17 (paging) and 27 (re-measuring) no longer apply to the panels.
+
+## 29. 3D with surroundings, real-scale exaggeration, larger fonts (user request)
+- **Decision:** By default the 3D view shows the AOI inside its surroundings. `GET /recon/{id}/terrain3d?scope=context` builds a grid around the AOI (each side extended by max(AOI side, 1.5 km), total side ≤ 40 km) at the DEM's native 30 m (coarser only to stay ≤ 512 px). It downloads Copernicus DEM for it once through the gateway (`purpose = dem_context_download`, logged) and caches it as `raw/dem_context.npz`. Analysis layers are drawn only over the AOI part of the texture (they exist only there); the rest is Esri imagery. "Faqat maydon" switches to `scope=aoi`, and "Maydonga qaytish" re-centres the camera on the AOI. Vertical exaggeration ranges from 1× (true real-world scale, the default) to 10×. The Esri base loads in the background (≤ 144 tiles, texture ≤ 4096 px) so the layers appear immediately.
+- **Layers:** "Hammasini olib tashlash" unchecks every visible layer and the composite in one click.
+- **UI:** panel fonts were enlarged by about 1–1.5 px. Text inputs (including the login form and browser autofill) use a dark background with light text.

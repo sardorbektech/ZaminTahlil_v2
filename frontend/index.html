@@ -9,8 +9,27 @@
   <link rel="stylesheet" href="css/main.css">
   <link rel="stylesheet" href="css/map.css">
   <link rel="stylesheet" href="css/panels.css">
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+      }
+    }
+  </script>
 </head>
 <body>
+  <div id="login-screen" class="login-screen" hidden>
+    <form id="login-form" class="login-box" autocomplete="on">
+      <h2 data-i18n="app.brand"></h2>
+      <p class="muted small" data-i18n="login.hint"></p>
+      <label><span data-i18n="login.username"></span><input id="login-user" name="username" autocomplete="username" required></label>
+      <label><span data-i18n="login.password"></span><input id="login-pass" name="password" type="password" autocomplete="current-password" required></label>
+      <div id="login-error" class="login-error"></div>
+      <button type="submit" class="btn-primary" data-i18n="login.submit"></button>
+    </form>
+  </div>
+
   <div id="app">
     <header id="topbar">
       <div class="tb-group">
@@ -20,19 +39,37 @@
         <button id="btn-clear" data-i18n-title="topbar.clear_title"><span class="ico">✕</span><span data-i18n="topbar.clear"></span></button>
       </div>
       <div class="tb-group tb-center">
-        <span class="muted" data-i18n="topbar.area"></span>
+        <input id="area-name" class="area-name-input" maxlength="120" data-i18n-placeholder="topbar.name_placeholder">
         <span id="area-badge" class="badge">0.00 km²</span>
         <span id="state-badge" class="badge state"></span>
       </div>
       <div class="tb-group">
         <button id="btn-recon" class="btn-primary" disabled><span data-i18n="topbar.recon"></span></button>
         <button id="btn-stop" class="btn-danger" disabled><span data-i18n="topbar.stop"></span></button>
-        <button id="btn-settings"><span class="ico">⚙</span><span data-i18n="topbar.settings"></span></button>
+        <button id="btn-3d" disabled data-i18n-title="topbar.view3d_title"><span class="ico">⛰</span><span id="btn-3d-text" data-i18n="topbar.view3d"></span></button>
+        <button id="btn-labels" disabled data-i18n-title="topbar.labels_title"><span class="ico">🏷</span><span data-i18n="topbar.labels"></span></button>
+        <button id="btn-areas" data-i18n-title="topbar.areas_title"><span class="ico">☰</span><span data-i18n="topbar.areas"></span></button>
+        <button id="btn-settings" data-i18n-title="topbar.settings"><span class="ico">⚙</span></button>
+        <button id="btn-logout" data-i18n-title="topbar.logout"><span class="ico">⏻</span><span id="user-name"></span></button>
       </div>
     </header>
 
     <main id="workspace">
-      <div id="map"></div>
+      <div id="map-wrap">
+        <div id="map"></div>
+        <div id="view3d" hidden>
+          <div class="v3d-canvas"></div>
+          <div class="v3d-bar">
+            <span class="v3d-meta muted small"></span>
+            <button id="btn-v3d-scope" class="small" data-i18n="view3d.only_aoi" data-i18n-title="view3d.only_aoi_title"></button>
+            <button id="btn-v3d-focus" class="small" data-i18n="view3d.focus" data-i18n-title="view3d.focus_title"></button>
+            <label class="small" data-i18n-title="view3d.exaggeration_title"><span data-i18n="view3d.exaggeration"></span>
+              <input type="range" id="v3d-exag" min="1" max="10" step="0.5" value="1"><span id="v3d-exag-val"></span></label>
+            <span class="muted small" data-i18n="view3d.hint"></span>
+          </div>
+          <div class="v3d-info" hidden><button class="icon-btn v3d-info-close">✕</button><div class="pp"></div></div>
+        </div>
+      </div>
       <aside id="panel">
         <nav class="tabs">
           <button class="tab active" data-tab="layers" data-i18n="tabs.layers"></button>
@@ -40,10 +77,15 @@
           <button class="tab" data-tab="weather" data-i18n="tabs.weather"></button>
           <button class="tab" data-tab="satellites" data-i18n="tabs.satellites"></button>
           <button class="tab" data-tab="report" data-i18n="tabs.report"></button>
+          <button class="tab" data-tab="chat" data-i18n="tabs.chat"></button>
           <button class="tab" data-tab="usage" data-i18n="tabs.usage"></button>
         </nav>
         <section class="tab-pane active" id="pane-layers">
           <div id="composer" class="composer"></div>
+          <div class="layers-toolbar">
+            <span id="layers-count" class="muted small"></span>
+            <button id="btn-layers-clear" disabled data-i18n="layers.clear_all" data-i18n-title="layers.clear_all_title"></button>
+          </div>
           <div class="paged" id="layers-pages"></div>
         </section>
         <section class="tab-pane" id="pane-info"><div class="paged" id="info-pages"></div></section>
@@ -56,6 +98,17 @@
           </div>
           <div id="report-meta" class="muted small"></div>
           <div class="paged md" id="report-pages"></div>
+        </section>
+        <section class="tab-pane" id="pane-chat">
+          <div class="muted small" data-i18n="chat.scope"></div>
+          <div class="paged md chat" id="chat-pages"></div>
+          <div class="chat-input">
+            <textarea id="chat-input" rows="2" maxlength="2000" data-i18n-placeholder="chat.placeholder" disabled></textarea>
+            <div class="chat-btns">
+              <button id="btn-chat-send" class="btn-primary" disabled data-i18n="chat.send"></button>
+              <button id="btn-chat-clear" disabled data-i18n="chat.clear"></button>
+            </div>
+          </div>
         </section>
         <section class="tab-pane" id="pane-usage"><div class="paged md" id="usage-pages"></div></section>
       </aside>
@@ -86,6 +139,16 @@
         <button id="btn-settings-cancel" data-i18n="settings.cancel"></button>
         <button id="btn-settings-save" class="btn-primary" data-i18n="settings.save"></button>
       </div>
+    </div>
+  </div>
+
+  <div id="areas-modal" class="modal" hidden>
+    <div class="modal-box areas-box">
+      <div class="modal-head">
+        <h3 data-i18n="areas.title"></h3>
+        <button id="btn-areas-close" class="icon-btn" data-i18n-title="common.close">✕</button>
+      </div>
+      <div class="paged" id="areas-pages"></div>
     </div>
   </div>
 

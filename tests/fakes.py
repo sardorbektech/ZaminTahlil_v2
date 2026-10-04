@@ -99,6 +99,11 @@ class FakeSource:
                     "SR_B6": dn(0.2), "SR_B7": dn(0.14), "ST_B10": st, "QA_PIXEL": qa}
         raise AssertionError(obs.sensor)
 
+    async def download_dem_context(self, grid: Grid, ctx: CallContext) -> dict[str, np.ndarray]:
+        await self._log(ctx, "computePixels", "dem_context_download", D.DEM_COLLECTION)
+        y, x = np.mgrid[0 : grid.height, 0 : grid.width]
+        return {"DEM": (400.0 + x * 0.2 + y * 0.1).astype(np.float32)}
+
     async def download_static(self, product: StaticProduct, grid: Grid, s: RunSettings, ctx: CallContext) -> dict[str, np.ndarray]:
         await self._log(ctx, "computePixels", f"{product.sensor.name.lower()}_download", product.dataset)
         y, x = np.mgrid[0 : grid.height, 0 : grid.width]
@@ -155,3 +160,11 @@ class FakeAIClient:
         if self.calls <= self.fail_times:
             raise AIReportError("Soxta provayder xatosi")
         return self.content
+
+    async def chat(self, provider: str, model: str, messages: list[dict[str, str]], run_id: int | None = None) -> str:
+        """Soxta suhbat: oxirgi savolni va kontekstda maydon bor-yo'qligini aks ettiradi."""
+        self.calls += 1
+        self.last_messages = messages
+        if self.calls <= self.fail_times:
+            raise AIReportError("Soxta provayder xatosi")
+        return f"Javob: {messages[-1]['content']}"

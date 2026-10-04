@@ -464,6 +464,29 @@ class GEESource:
         log_telemetry(product.sensor.name, "Qabul qilindi", f"bandlar: {', '.join(sorted(data))}", product.acq_time)
         return data
 
+    async def download_dem_context(self, grid: Grid, ctx: CallContext) -> dict[str, np.ndarray]:
+        """3D atrof ko'rinishi uchun kengaytirilgan to'rdagi Copernicus DEM (plitkalar nomidagi 1° katak bo'yicha)."""
+        (s_lat, w_lon), (n_lat, e_lon) = grid.bounds_latlon()
+        rect = {"type": "Polygon", "coordinates": [[[w_lon, s_lat], [e_lon, s_lat], [e_lon, n_lat], [w_lon, n_lat], [w_lon, s_lat]]]}
+
+        def ids_build() -> Any:
+            ee = _ee()
+            return ee.ImageCollection(D.DEM_COLLECTION).filterBounds(self._geom(rect)).aggregate_array("system:index")
+
+        ids = await self._info(ids_build, ctx, "listTiles", "dem_context_discovery", D.DEM_COLLECTION)
+        tiles = dem_tiles_for_aoi([str(x) for x in ids or []], rect)
+        if not tiles:
+            return {}
+
+        def build() -> Any:
+            ee = _ee()
+            col = ee.ImageCollection(D.DEM_COLLECTION).filter(ee.Filter.inList("system:index", tiles))
+            proj = col.first().select(D.DEM_BAND).projection()
+            return col.select(D.DEM_BAND).mosaic().setDefaultProjection(proj).resample("bilinear").unmask(C.NODATA_FLOAT).toFloat()
+
+        raw = await self._compute_pixels(build, grid, ctx, "dem_context_download", D.DEM_COLLECTION, C.NODATA_FLOAT, np.float32)
+        return convert_float_product(raw)
+
     # ------------------------------------------------------------------
     # 6-bosqich: ob-havo (AOI bo'yicha o'rtacha, min, max)
     # ------------------------------------------------------------------

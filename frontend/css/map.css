@@ -2,7 +2,7 @@
 .leaflet-container { background: #0b1220; font: 12px var(--font); }
 
 /* Sanalar orasida oddiy cross-fade */
-.zt-overlay { transition: opacity .45s ease; }
+.zt-overlay { transition: opacity .25s linear; }
 
 /* Skan: AOI atrofida harakatlanuvchi punktir chiziq */
 .scan-outline {
@@ -27,3 +27,23 @@
 .pp td:last-child { text-align: right; font-family: var(--mono); }
 .pp-pager { display: flex; align-items: center; justify-content: space-between; gap: 6px; padding-top: 4px; font-size: 11px; }
 .pp-pager button { background: #e2e8f0; color: #0f172a; border-color: #cbd5e1; padding: 1px 8px; }
+
+/* Xarita va 3D konteyneri */
+#map-wrap { position: relative; width: 100%; height: 100%; min-height: 0; overflow: hidden; }
+#map-wrap #map { position: absolute; inset: 0; }
+#view3d { position: absolute; inset: 0; z-index: 1100; background: #0b1220; display: flex; flex-direction: column; }
+#view3d[hidden] { display: none; }
+.v3d-canvas { position: relative; flex: 1; min-height: 0; overflow: hidden; }
+.v3d-canvas canvas { display: block; }
+.v3d-labels { position: absolute; inset: 0; pointer-events: none; }
+.v3d-bar { display: flex; align-items: center; gap: 14px; padding: 5px 10px; background: var(--bg2); border-top: 1px solid var(--line); overflow: hidden; white-space: nowrap; }
+.v3d-bar label { display: flex; align-items: center; gap: 6px; }
+.v3d-info { position: absolute; top: 10px; right: 10px; z-index: 5; background: #f8fafc; border-radius: 8px; padding: 8px 10px 6px; box-shadow: 0 8px 24px rgba(0,0,0,.45); }
+.v3d-info[hidden] { display: none; }
+.v3d-info-close { position: absolute; top: 2px; right: 4px; color: #0f172a; }
+.label3d, .label2d { font: 600 11px var(--font); color: #fff; white-space: nowrap; text-shadow: 0 1px 2px #000, 0 0 4px #000; }
+.label3d { background: rgba(11, 18, 32, .72); padding: 2px 6px; border-radius: 4px; border: 1px solid rgba(255,255,255,.15); }
+.label3d .muted { color: #cbd5e1; font-weight: 400; }
+.label2d { transform: translate(-50%, -50%); }
+.label2d .swatch, .label3d .swatch { width: 9px; height: 9px; }
+.pp-muted { color: #64748b; font-weight: 400; }

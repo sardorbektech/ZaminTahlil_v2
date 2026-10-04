@@ -31,6 +31,7 @@ class Job:
     """Bitta faol (yoki yaqinda tugagan) run holati."""
 
     run_id: int
+    owner_id: int = 0
     task: asyncio.Task[Any] | None = None
     events: list[dict[str, Any]] = field(default_factory=list)
     subscribers: list[asyncio.Queue[dict[str, Any]]] = field(default_factory=list)
@@ -93,6 +94,10 @@ class JobManager:
             return self.active.run_id
         return None
 
+    def active_owner(self) -> int | None:
+        rid = self.active_run_id()
+        return self.active.owner_id if rid is not None and self.active is not None else None
+
     def get_job(self, run_id: int) -> Job | None:
         for j in (self.active, self.last):
             if j is not None and j.run_id == run_id:
@@ -103,13 +108,14 @@ class JobManager:
         self,
         create_run: Callable[[], Awaitable[int]],
         runner: Callable[[Job], Awaitable[None]],
+        owner_id: int = 0,
     ) -> Job:
         """Yangi vazifani boshlaydi. `create_run` DB qatorini yaratadi, `runner` quvurni bajaradi."""
         async with self._lock:
             if self.active_run_id() is not None:
                 raise ConflictError()
             run_id = await create_run()
-            job = Job(run_id=run_id)
+            job = Job(run_id=run_id, owner_id=owner_id)
             self.last, self.active = self.active, job
             job.task = asyncio.create_task(self._wrap(job, runner), name=f"recon-{run_id}")
             return job

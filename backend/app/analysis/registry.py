@@ -31,3 +31,31 @@ def get_analyzer(name: str) -> Analyzer:
 def list_analyzers() -> dict[str, str]:
     """Ro'yxatdan o'tgan analizatorlar: {nom: versiya}."""
     return {k: v.version for k, v in _ANALYZERS.items()}
+
+
+def _ensure() -> None:
+    if not _ANALYZERS:
+        from backend.app.analysis.analyzers import init_all_analyzers
+
+        init_all_analyzers()
+
+
+def analyzers_for(stage: str, slot: str) -> list[Analyzer]:
+    """Berilgan bosqich va slot uchun analizatorlar (masalan, S2 kuzatuvidagi qo'shimcha ML qatlamlari)."""
+    _ensure()
+    return [a for a in _ANALYZERS.values() if getattr(a, "stage", None) == stage and getattr(a, "slot", None) == slot]
+
+
+def landcover_choices() -> list[dict[str, str]]:
+    """Yer qoplami slotiga qo'yish mumkin bo'lgan analizatorlar (sozlamalar uchun)."""
+    _ensure()
+    return [
+        {"name": a.name, "version": a.version, "method": getattr(a, "method", "rules")}
+        for a in _ANALYZERS.values()
+        if getattr(a, "slot", None) == "landcover"
+    ]
+
+
+def unregister_analyzer(name: str) -> None:
+    """Testlar uchun: analizatorni registrdan olib tashlash."""
+    _ANALYZERS.pop(name, None)

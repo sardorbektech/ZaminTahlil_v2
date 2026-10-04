@@ -1,29 +1,26 @@
-/**
- * Server-Sent Events (SSE) orqali vazifa progressini tinglash.
- */
+/** Run hodisalari oqimi (SSE). Server tarixdan boshlab yuboradi, yakuniy hodisada oqim yopiladi. */
 
-export function listenToReconEvents(runId, onMessage, onError) {
-  const eventSource = new EventSource(`/api/v1/recon/${runId}/events`);
+const TERMINAL = new Set(["done", "cancelled", "error", "duplicate"]);
 
-  eventSource.onmessage = (event) => {
-    try {
-      const data = JSON.parse(event.data);
-      if (onMessage) onMessage(data);
-      if (data.stage === 10) {
-        eventSource.close();
-      }
-    } catch (e) {
-      console.error("SSE JSON parsing error:", e);
+export function listenRun(runId, onEvent, onLost) {
+  const es = new EventSource(`/api/v1/recon/${runId}/events`);
+  let lastSeq = -1;
+  let finished = false;
+  es.onmessage = (msg) => {
+    let ev;
+    try { ev = JSON.parse(msg.data); } catch (_e) { return; }
+    if (typeof ev.seq === "number" && ev.seq <= lastSeq && ev.type === "progress") return; // qayta ulanishdagi takror
+    lastSeq = Math.max(lastSeq, ev.seq ?? lastSeq);
+    onEvent(ev);
+    if (TERMINAL.has(ev.type)) {
+      finished = true;
+      es.close();
     }
   };
-
-  eventSource.onerror = (err) => {
-    console.warn("SSE aloqa uzildi yoki xatolik:", err);
-    eventSource.close();
-    if (onError) onError(err);
+  es.onerror = () => {
+    if (finished) return;
+    // EventSource oʻzi qayta ulanadi; server yopilgan boʻlsa — xabar beramiz
+    if (es.readyState === EventSource.CLOSED) onLost?.();
   };
-
-  return {
-    close: () => eventSource.close(),
-  };
+  return { close: () => { finished = true; es.close(); } };
 }

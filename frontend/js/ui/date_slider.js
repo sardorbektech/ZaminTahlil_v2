@@ -1,37 +1,37 @@
-/**
- * Haqiqiy kuzatuv sanalari bo'yicha slayder va cross-fade o'tishlar.
- */
+/** Pastki sana slayderi: faqat haqiqiy kuzatuv sanalari (interpolatsiya qilingan kadrlar yoʻq). */
+import { uz } from "../i18n/uz.js";
 
-let datesList = [];
-let onDateChangedCallback = null;
+let dates = [];
+let onChange = null;
 
-export function setupDateSlider(dates, onDateChanged) {
-  datesList = dates;
-  onDateChangedCallback = onDateChanged;
+const slider = () => document.getElementById("date-slider");
+const label = () => document.getElementById("date-label");
 
-  const slider = document.getElementById("date-slider");
-  const display = document.getElementById("date-display");
+function show(i) {
+  const d = dates[i];
+  label().textContent = d ? `${d.time_local} · ${d.sensors.join(", ")}` : uz.bottom.no_dates;
+}
 
-  if (!slider || !display) return;
+export function initDateSlider(cb) {
+  onChange = cb;
+  slider().addEventListener("input", () => {
+    const i = parseInt(slider().value, 10);
+    show(i);
+    onChange?.(dates[i]?.time_ts ?? null);
+  });
+}
 
-  if (dates.length === 0) {
-    slider.disabled = true;
-    display.textContent = "Sana mavjud emas";
-    return;
-  }
+export function setDates(list) {
+  dates = list || [];
+  const s = slider();
+  s.min = "0";
+  s.max = String(Math.max(0, dates.length - 1));
+  s.value = s.max;
+  s.disabled = dates.length < 2;
+  show(dates.length - 1);
+  return dates.length ? dates[dates.length - 1].time_ts : null;
+}
 
-  slider.disabled = false;
-  slider.min = "0";
-  slider.max = (dates.length - 1).toString();
-  slider.value = (dates.length - 1).toString(); // Eng oxirgi sana
-  display.textContent = dates[dates.length - 1].label;
-
-  slider.oninput = (e) => {
-    const idx = parseInt(e.target.value, 10);
-    const selected = datesList[idx];
-    if (selected) {
-      display.textContent = selected.label;
-      if (onDateChangedCallback) onDateChangedCallback(selected);
-    }
-  };
+export function clearDates() {
+  setDates([]);
 }

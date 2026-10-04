@@ -1,9 +1,9 @@
 /**
- * Frontend State Machine va global holat boshqaruvi.
- * Holatlar: idle -> ready -> running -> done | cancelled | error.
+ * Holat mashinasi: idle → ready → running → done | cancelled | error.
+ * Ruxsat etilmagan oʻtishlar rad etiladi.
  */
 
-export const AppState = {
+export const S = {
   IDLE: "idle",
   READY: "ready",
   RUNNING: "running",
@@ -12,42 +12,44 @@ export const AppState = {
   ERROR: "error",
 };
 
-class StateManager {
+const ALLOWED = {
+  idle: ["ready", "running", "done"],
+  ready: ["idle", "ready", "running", "done"],
+  running: ["done", "cancelled", "error"],
+  done: ["idle", "ready", "running", "done"],
+  cancelled: ["idle", "ready", "running", "done"],
+  error: ["idle", "ready", "running", "done"],
+};
+
+class Store {
   constructor() {
-    this.currentState = AppState.IDLE;
-    this.currentAoi = null;
-    this.currentAreaKm2 = 0.0;
-    this.currentRunId = null;
-    this.listeners = [];
+    this.state = S.IDLE;
+    this.aoi = null; // GeoJSON Polygon
+    this.areaKm2 = 0;
+    this.runId = null; // natijalari koʻrsatilayotgan run
+    this.maxAoiKm2 = 100;
+    this.listeners = new Set();
   }
 
-  getState() {
-    return this.currentState;
-  }
-
-  setState(newState, payload = {}) {
-    this.currentState = newState;
-    if (payload.aoi !== undefined) this.currentAoi = payload.aoi;
-    if (payload.areaKm2 !== undefined) this.currentAreaKm2 = payload.areaKm2;
-    if (payload.runId !== undefined) this.currentRunId = payload.runId;
-
-    this.notifyListeners();
-  }
-
-  subscribe(callback) {
-    this.listeners.push(callback);
-  }
-
-  notifyListeners() {
-    for (const cb of this.listeners) {
-      cb({
-        state: this.currentState,
-        aoi: this.currentAoi,
-        areaKm2: this.currentAreaKm2,
-        runId: this.currentRunId,
-      });
+  set(next, patch = {}) {
+    if (next !== this.state && !ALLOWED[this.state].includes(next)) {
+      console.warn(`Notoʻgʻri holat oʻtishi: ${this.state} → ${next}`);
+      return false;
     }
+    Object.assign(this, patch);
+    this.state = next;
+    this.listeners.forEach((fn) => fn(this));
+    return true;
+  }
+
+  patch(p) {
+    Object.assign(this, p);
+    this.listeners.forEach((fn) => fn(this));
+  }
+
+  on(fn) {
+    this.listeners.add(fn);
   }
 }
 
-export const stateManager = new StateManager();
+export const store = new Store();

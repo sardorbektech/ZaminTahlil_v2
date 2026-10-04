@@ -1,24 +1,99 @@
-"""Yer qoplamini qoidalar asosida 10 ta sinfga klassifikatsiya qilish moduli.
+"""Yer qoplamini qoidalar asosida sinflarga ajratish (SIMPLE.md §7.4).
 
-Mantiqiy qoidalar, ostonaviy qiymatlar va ishonchlilik (confidence score) baholash.
+Barcha chegaralar core/constants.py da. Kirish massivlari float32, NaN — ma'lumot yo'q.
+NaN bilan taqqoslash har doim False beradi, shuning uchun yo'q dalil hech qachon "bor" deb hisoblanmaydi.
 """
 
 import numpy as np
-from scipy.ndimage import binary_dilation, label
+from scipy.ndimage import binary_dilation, find_objects, label
 
-from backend.app.core.constants import (
-    CLASS_BARE_SOIL,
-    CLASS_BRIDGE,
-    CLASS_BUILTUP,
-    CLASS_BURNT,
-    CLASS_CROPLAND,
-    CLASS_FOREST,
-    CLASS_ROAD,
-    CLASS_SPARSE_VEG,
-    CLASS_SWAMP,
-    CLASS_UNKNOWN,
-    CLASS_WATER,
-)
+from backend.app.core import constants as C
+
+
+def _gt(a: np.ndarray | None, v: float) -> np.ndarray | None:
+    if a is None:
+        return None
+    with np.errstate(invalid="ignore"):
+        return a > v
+
+
+def _lt(a: np.ndarray | None, v: float) -> np.ndarray | None:
+    if a is None:
+        return None
+    with np.errstate(invalid="ignore"):
+        return a < v
+
+
+def _between(a: np.ndarray, lo: float, hi: float) -> np.ndarray:
+    with np.errstate(invalid="ignore"):
+        return (a >= lo) & (a <= hi)
+
+
+def find_road_components(candidates: np.ndarray) -> np.ndarray:
+    """Cho'zilgan bog'langan komponentlarni (ehtimoliy yo'llar) topadi.
+
+    Har bir 8-bog'langan komponent uchun piksel koordinatalari kovariatsiyasining xos qiymatlari
+    λ1 ≥ λ2 olinadi: cho'zilganlik = √(λ1/λ2). Shuningdek to'ldirish nisbati =
+    piksellar / (chegaralovchi to'rtburchak maydoni) — diagonal yo'llarni ham ushlash uchun
+    burilgan to'rtburchak o'rniga o'q bo'yicha uzunlik × o'rtacha kenglik ishlatiladi.
+    Shart: piksellar ≥ LC_ROAD_MIN_PIXELS va cho'zilganlik ≥ LC_ROAD_MIN_ELONGATION.
+    """
+    out = np.zeros(candidates.shape, dtype=bool)
+    structure = np.ones((3, 3), dtype=bool)
+    labeled, n = label(candidates, structure=structure)
+    if n == 0:
+        return out
+    for idx, sl in enumerate(find_objects(labeled), start=1):
+        if sl is None:
+            continue
+        comp = labeled[sl] == idx
+        count = int(comp.sum())
+        if count < C.LC_ROAD_MIN_PIXELS:
+            continue
+        ys, xs = np.nonzero(comp)
+        if count < 3:
+            continue
+        cov = np.cov(np.vstack([xs, ys]).astype(np.float64))
+        ev = np.sort(np.linalg.eigvalsh(cov))[::-1]
+        major = max(ev[0], 1e-9)
+        minor = max(ev[1], 1.0 / 12.0)  # bir piksel kenglikdagi chiziq dispersiyasi
+        elong = float(np.sqrt(major / minor))
+        if elong < C.LC_ROAD_MIN_ELONGATION:
+            continue
+        # Yo'l ingichka bo'ladi: uzunlik (≈ √(12·λ1)) bo'yicha o'rtacha kenglik kichik
+        length = float(np.sqrt(12.0 * major))
+        mean_width = count / max(length, 1.0)
+        if mean_width / max(length, 1.0) > C.LC_ROAD_MAX_FILL_RATIO:
+            continue
+        out[sl] |= comp
+    return out
+
+
+def find_bridge_pixels(structure_mask: np.ndarray, water: np.ndarray, reach_px: int = 3) -> np.ndarray:
+    """Suvni kesib o'tuvchi yo'l/imorat piksellari (ehtimoliy ko'prik).
+
+    Piksel ko'prik hisoblanadi, agar u suvga tegib turgan bo'lsa va uning ikki qarama-qarshi
+    tomonida (chap/o'ng yoki yuqori/past) reach_px masofa ichida suv bo'lsa.
+    """
+    near = binary_dilation(water, iterations=C.LC_BRIDGE_WATER_DILATION_PX)
+    h, w = water.shape
+
+    def shifted_any(dy: int, dx: int) -> np.ndarray:
+        acc = np.zeros_like(water)
+        for k in range(1, reach_px + 1):
+            src = np.zeros_like(water)
+            ys = slice(max(0, -dy * k), h - max(0, dy * k))
+            yd = slice(max(0, dy * k), h - max(0, -dy * k))
+            xs = slice(max(0, -dx * k), w - max(0, dx * k))
+            xd = slice(max(0, dx * k), w - max(0, -dx * k))
+            src[yd, xd] = water[ys, xs]
+            acc |= src
+        return acc
+
+    left, right = shifted_any(0, 1), shifted_any(0, -1)
+    up, down = shifted_any(1, 0), shifted_any(-1, 0)
+    crossing = (left & right) | (up & down)
+    return structure_mask & near & crossing
 
 
 def classify_landcover(
@@ -38,124 +113,144 @@ def classify_landcover(
     s2_scl: np.ndarray | None = None,
     delta_nbr: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Yer qoplamini 10 ta sinfga ajratadi va har bir piksel ishonchliligini hisoblaydi.
+    """Yer qoplamini 0–10 sinflarga ajratadi va har bir piksel uchun ishonchlilikni (0–1) beradi.
 
-    Qaytaradi:
-        (classes, confidence):
-            classes - uint8 turdagi 0 dan 10 gacha bo'lgan sinf kodlari
-            confidence - float32 turdagi 0.0 dan 1.0 gacha bo'lgan ishonchlilik darajasi
+    Qoidalar (ustuvorlik tartibida, keyingisi oldingisini ustidan yozadi):
+        6 Ochiq tuproq: BSI > 0 va NDVI < 0.15
+        5 Siyrak o'simlik: 0.15 ≤ NDVI < 0.3
+        4 Ekin/dala: 0.3 ≤ NDVI ≤ 0.6 (tekstura past; yuqori bo'lsa ishonch pasayadi)
+        3 Daraxtzor: NDVI > 0.6 va (tekstura yuqori yoki VH yuqori); aks holda ekin
+        2 Botqoqlik: 0.1 ≤ NDVI ≤ 0.5 va 5 ta dalildan ≥ 3 tasi
+           (NDWI o'rtacha, NDMI o'rtacha, pastqamlik, past VV, yuqori tuproq namligi)
+        7 Imorat: NDBI > 0, NDVI < 0.2 va (VV yuqori; SAR yo'q bo'lsa — tekstura yuqori)
+        10 Kuygan hudud: NBR < 0.1 va ΔNBR < −0.27 (oldingi kuzatuv bo'lsagina)
+        1 Suv: MNDWI > 0.1 yoki NDWI > 0.2 (SAR past qaytishi tasdiqlasa ishonch yuqori)
+        8 Yo'l: imorat/ochiq tuproqning cho'zilgan bog'langan komponentlari
+        9 Ko'prik: suvni kesib o'tgan yo'l/imorat piksellari
+        0 Noma'lum/bulut: niqoblangan yoki indeks hisoblanmagan piksellar
+    Ishonchlilik S2 SCL bilan ziddiyatda LC_CONF_SCL_PENALTY ga pasaytiriladi.
     """
-    rows, cols = ndvi.shape
-    classes = np.full((rows, cols), CLASS_UNKNOWN, dtype=np.uint8)
-    confidence = np.full((rows, cols), 0.5, dtype=np.float32)
+    shape = ndvi.shape
+    classes = np.full(shape, C.CLASS_UNKNOWN, dtype=np.uint8)
+    conf = np.zeros(shape, dtype=np.float32)
 
-    # 1. Bulut va yaroqsiz piksellar
-    is_invalid = np.isnan(ndvi) | np.isnan(ndwi)
+    invalid = np.isnan(ndvi) | np.isnan(ndwi) | np.isnan(mndwi) | np.isnan(bsi) | np.isnan(ndbi)
     if cloud_mask is not None:
-        is_invalid |= cloud_mask.astype(bool)
+        invalid |= cloud_mask.astype(bool)
 
-    # Dastlabki asosiy shartlar
-    # Suv: MNDWI > 0.1 yoki NDWI > 0.2
-    is_water_opt = (mndwi > 0.1) | (ndwi > 0.2)
-    if vv_db is not None:
-        is_water = is_water_opt | (vv_db < -15.0)
+    def assign(mask: np.ndarray, code: int, conf_scale: np.ndarray | float = 1.0) -> None:
+        m = mask & ~invalid
+        classes[m] = code
+        base = C.LC_CONF_BASE[code]
+        conf[m] = (base * conf_scale)[m] if isinstance(conf_scale, np.ndarray) else base * conf_scale
+
+    high_texture = _gt(texture, C.LC_FOREST_TEXTURE_MIN)
+    low_texture = _lt(texture, C.LC_CROP_TEXTURE_MAX)
+
+    # 6. Ochiq tuproq
+    with np.errstate(invalid="ignore"):
+        bare = (bsi > C.LC_BARE_BSI_MIN) & (ndvi < C.LC_BARE_NDVI_MAX)
+    assign(bare, C.CLASS_BARE_SOIL)
+
+    # 5. Siyrak o'simlik
+    with np.errstate(invalid="ignore"):
+        sparse = (ndvi >= C.LC_SPARSE_NDVI_RANGE[0]) & (ndvi < C.LC_SPARSE_NDVI_RANGE[1])
+    assign(sparse, C.CLASS_SPARSE_VEG)
+
+    # 4. Ekin / dala
+    crop = _between(ndvi, *C.LC_CROP_NDVI_RANGE)
+    crop_scale = np.ones(shape, dtype=np.float32)
+    if low_texture is not None:
+        crop_scale[~low_texture] = 0.8
+    assign(crop, C.CLASS_CROPLAND, crop_scale)
+
+    # 3. Daraxtzor
+    with np.errstate(invalid="ignore"):
+        dense = ndvi > C.LC_FOREST_NDVI_MIN
+    tree_evidence = np.zeros(shape, dtype=bool)
+    if high_texture is not None:
+        tree_evidence |= high_texture
+    vh_high = _gt(vh_db, C.LC_FOREST_VH_MIN_DB)
+    if vh_high is not None:
+        tree_evidence |= vh_high
+    assign(dense & tree_evidence, C.CLASS_FOREST)
+    assign(dense & ~tree_evidence, C.CLASS_CROPLAND, 0.8)  # zich, lekin bir xil — zich ekin
+
+    # 2. Botqoqlik (dalillar soni)
+    swamp_ndvi = _between(ndvi, *C.LC_SWAMP_NDVI_RANGE)
+    evidence = np.zeros(shape, dtype=np.int8)
+    available = np.zeros(shape, dtype=np.int8)
+    for ev in (
+        _gt(ndwi, C.LC_SWAMP_NDWI_MIN),
+        _gt(ndmi, C.LC_SWAMP_NDMI_MIN),
+        _gt(depression_mask, 0.5),
+        _lt(vv_db, C.LC_SWAMP_VV_MAX_DB),
+        _gt(soil_moisture, C.LC_SWAMP_SM_MIN),
+    ):
+        if ev is not None:
+            evidence += ev.astype(np.int8)
+            available += 1
+    if int(available.max(initial=0)) >= C.LC_SWAMP_MIN_EVIDENCE:
+        swamp = swamp_ndvi & (evidence >= C.LC_SWAMP_MIN_EVIDENCE)
+        swamp_scale = np.clip(evidence / np.maximum(available, 1), 0.0, 1.0).astype(np.float32) + 0.4
+        assign(swamp, C.CLASS_SWAMP, np.minimum(swamp_scale, 1.0))
+
+    # 7. Imorat
+    with np.errstate(invalid="ignore"):
+        built_opt = (ndbi > C.LC_BUILT_NDBI_MIN) & (ndvi < C.LC_BUILT_NDVI_MAX)
+    vv_high = _gt(vv_db, C.LC_BUILT_VV_MIN_DB)
+    if vv_high is not None:
+        sar_ok = ~np.isnan(vv_db)
+        built = built_opt & ((sar_ok & vv_high) | (~sar_ok & (high_texture if high_texture is not None else False)))
     else:
-        is_water = is_water_opt
+        built = built_opt & (high_texture if high_texture is not None else np.zeros(shape, dtype=bool))
+    assign(built, C.CLASS_BUILTUP, 1.0 if vv_db is not None else 0.8)
 
-    # Kuygan hudud: past NBR va NBR pasayishi
+    # 10. Kuygan hudud (faqat NBR pasayishi ma'lum bo'lsa)
     if delta_nbr is not None:
-        is_burnt = (nbr < 0.1) & (delta_nbr < -0.2)
-    else:
-        is_burnt = nbr < -0.15
+        with np.errstate(invalid="ignore"):
+            burnt = (nbr < C.LC_BURNT_NBR_MAX) & (delta_nbr < C.LC_BURNT_DNBR_MAX)
+        assign(burnt, C.CLASS_BURNT)
 
-    # Botqoqlik: o'rtacha NDWI/NDMI, NDVI 0.1-0.5, pastqamlik
-    is_swamp = (ndwi > 0.0) & (ndvi >= 0.1) & (ndvi <= 0.5)
-    if depression_mask is not None:
-        is_swamp &= depression_mask > 0.5
-    if soil_moisture is not None:
-        is_swamp &= soil_moisture > 0.35
-
-    # Daraxtzor: NDVI > 0.6
-    is_forest = ndvi > 0.6
-    if texture is not None:
-        is_forest &= texture > 0.04
-
-    # Ekin / dala: NDVI 0.3 - 0.6
-    is_crop = (ndvi >= 0.3) & (ndvi <= 0.6)
-    if texture is not None:
-        is_crop &= texture <= 0.06
-
-    # Siyrak o'simlik: NDVI 0.15 - 0.3
-    is_sparse = (ndvi >= 0.15) & (ndvi < 0.3)
-
-    # Ochiq tuproq: BSI > 0, NDVI < 0.15
-    is_bare = (bsi > 0.0) & (ndvi < 0.15)
-
-    # Imorat: NDBI > 0, past NDVI
-    is_builtup = (ndbi > 0.0) & (ndvi < 0.25)
+    # 1. Suv
+    with np.errstate(invalid="ignore"):
+        water_opt = (mndwi > C.LC_WATER_MNDWI_MIN) | (ndwi > C.LC_WATER_NDWI_MIN)
+    water_scale = np.ones(shape, dtype=np.float32)
     if vv_db is not None:
-        is_builtup &= vv_db > -10.0
+        low_bs = _lt(vv_db, C.LC_WATER_VV_MAX_DB)
+        if vh_db is not None:
+            low_bs = low_bs | _lt(vh_db, C.LC_WATER_VH_MAX_DB)
+        sar_known = ~np.isnan(vv_db)
+        water_scale[sar_known & ~low_bs] = 0.7  # SAR suvni tasdiqlamadi
+    assign(water_opt, C.CLASS_WATER, water_scale)
 
-    # Sinflarni ketma-ket joylashtirish (prioritetlar bilan)
-    # Avval fon: ochiq tuproq
-    classes[is_bare] = CLASS_BARE_SOIL
-    confidence[is_bare] = 0.80
+    # 8. Yo'l (ehtimoliy)
+    roads = find_road_components((classes == C.CLASS_BUILTUP) | (classes == C.CLASS_BARE_SOIL))
+    assign(roads, C.CLASS_ROAD)
 
-    classes[is_sparse] = CLASS_SPARSE_VEG
-    confidence[is_sparse] = 0.80
+    # 9. Ko'prik (ehtimoliy)
+    water = classes == C.CLASS_WATER
+    if water.any():
+        bridges = find_bridge_pixels((classes == C.CLASS_ROAD) | (classes == C.CLASS_BUILTUP), water)
+        assign(bridges, C.CLASS_BRIDGE)
 
-    classes[is_crop] = CLASS_CROPLAND
-    confidence[is_crop] = 0.85
+    # 0. Noma'lum / bulut
+    classes[invalid] = C.CLASS_UNKNOWN
+    conf[invalid] = 0.0
 
-    classes[is_forest] = CLASS_FOREST
-    confidence[is_forest] = 0.90
-
-    classes[is_builtup] = CLASS_BUILTUP
-    confidence[is_builtup] = 0.85
-
-    classes[is_swamp] = CLASS_SWAMP
-    confidence[is_swamp] = 0.75
-
-    classes[is_burnt] = CLASS_BURNT
-    confidence[is_burnt] = 0.80
-
-    classes[is_water] = CLASS_WATER
-    confidence[is_water] = 0.95
-
-    # 8. Yo'llar (ehtimoliy): imorat yoki ochiq tuproq piksellarining cho'zilgan komponentlari
-    road_candidates = (classes == CLASS_BUILTUP) | (classes == CLASS_BARE_SOIL)
-    labeled_comp, num_comp = label(road_candidates)
-    if num_comp > 0:
-        for c_id in range(1, min(num_comp + 1, 500)):
-            comp_mask = labeled_comp == c_id
-            count = np.sum(comp_mask)
-            if 15 <= count <= 3000:
-                y_idx, x_idx = np.where(comp_mask)
-                dx = np.max(x_idx) - np.min(x_idx) + 1
-                dy = np.max(y_idx) - np.min(y_idx) + 1
-                aspect_ratio = max(dx, dy) / (min(dx, dy) + 1e-5)
-                if aspect_ratio > 3.5:
-                    classes[comp_mask] = CLASS_ROAD
-                    confidence[comp_mask] = 0.70
-
-    # 9. Ko'priklar (ehtimoliy): yo'l yoki imorat piksellari suv bilan kesishganda
-    is_water_pixels = classes == CLASS_WATER
-    water_dilated = binary_dilation(is_water_pixels, iterations=2)
-    bridge_mask = (classes == CLASS_ROAD) & water_dilated
-    classes[bridge_mask] = CLASS_BRIDGE
-    confidence[bridge_mask] = 0.65
-
-    # Noma'lum / bulut
-    classes[is_invalid] = CLASS_UNKNOWN
-    confidence[is_invalid] = 0.0
-
-    # S2 SCL bilan taqqoslab ishonchlilikni pasaytirish
+    # S2 SCL bilan muvofiqlik
     if s2_scl is not None:
-        # SCL: 3 - Cloud Shadow, 4 - Vegetation, 5 - Not-vegetated, 6 - Water, 8,9,10 - Clouds, 11 - Snow
-        scl_disagree = np.zeros((rows, cols), dtype=bool)
-        scl_disagree |= (classes == CLASS_WATER) & (s2_scl != 6)
-        scl_disagree |= (classes == CLASS_FOREST) & (s2_scl != 4)
-        scl_disagree |= (classes == CLASS_BARE_SOIL) & (~np.isin(s2_scl, [4, 5]))
-        confidence[scl_disagree] = np.maximum(confidence[scl_disagree] - 0.25, 0.1)
+        scl = np.nan_to_num(s2_scl, nan=0).astype(np.int16)
+        scl_known = ~np.isnan(s2_scl)
+        disagree = np.zeros(shape, dtype=bool)
+        disagree |= (classes == C.CLASS_WATER) & (scl != C.SCL_WATER)
+        disagree |= np.isin(classes, (C.CLASS_FOREST, C.CLASS_CROPLAND, C.CLASS_SPARSE_VEG)) & (
+            scl != C.SCL_VEGETATION
+        )
+        disagree |= np.isin(classes, (C.CLASS_BARE_SOIL, C.CLASS_BUILTUP, C.CLASS_ROAD)) & (
+            scl != C.SCL_NOT_VEGETATED
+        )
+        disagree &= scl_known & (classes != C.CLASS_UNKNOWN)
+        conf[disagree] = np.maximum(conf[disagree] - C.LC_CONF_SCL_PENALTY, C.LC_CONF_MIN)
 
-    return classes, confidence
+    return classes, conf

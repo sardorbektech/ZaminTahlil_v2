@@ -1,81 +1,29 @@
-/* Xarita, qatlamlar va skanerlash animatsiyasi stillari */
+/* Xarita, qatlamlar, skan animatsiyasi va nuqta popup'i */
+.leaflet-container { background: #0b1220; font: 12px var(--font); }
 
-#map {
-  flex: 1;
-  height: 100%;
-  background-color: #0b1120;
-  position: relative;
-  z-index: 100;
-}
+/* Sanalar orasida oddiy cross-fade */
+.zt-overlay { transition: opacity .45s ease; }
 
-/* Skanerlash animatsiyasi (Dashed outline va moving sweep) */
-.scan-aoi-polygon {
-  stroke-dasharray: 8, 8;
-  animation: dashAnimation 1.5s linear infinite;
+/* Skan: AOI atrofida harakatlanuvchi punktir chiziq */
+.scan-outline {
+  stroke-dasharray: 10 8;
+  animation: dash-move 0.9s linear infinite;
 }
+@keyframes dash-move { to { stroke-dashoffset: -18; } }
+.scan-sweep { pointer-events: none; }
+.scan-sweep .beam { transform-box: view-box; animation: sweep 2.4s ease-in-out infinite alternate; }
+@keyframes sweep { from { transform: translateX(-30%); } to { transform: translateX(100%); } }
 
-@keyframes dashAnimation {
-  from {
-    stroke-dashoffset: 0;
-  }
-  to {
-    stroke-dashoffset: 32;
-  }
-}
-
-.scan-sweep-line {
-  position: absolute;
-  top: 0;
-  left: 0;
-  width: 100%;
-  height: 2px;
-  background: linear-gradient(90deg, transparent, #38bdf8, #38bdf8, transparent);
-  box-shadow: 0 0 15px #38bdf8;
-  animation: sweepMove 2s ease-in-out infinite alternate;
-  pointer-events: none;
-  z-index: 500;
-}
-
-@keyframes sweepMove {
-  0% {
-    top: 5%;
-    opacity: 0.2;
-  }
-  50% {
-    opacity: 0.9;
-  }
-  100% {
-    top: 95%;
-    opacity: 0.2;
-  }
-}
-
-/* Leaflet popuplari */
-.leaflet-popup-content-wrapper {
-  background-color: var(--bg-secondary) !important;
-  color: var(--text-main) !important;
-  border: 1px solid var(--border) !important;
-  border-radius: 6px !important;
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.6) !important;
-  font-family: var(--font-family) !important;
-  font-size: 12px !important;
-}
-
-.leaflet-popup-tip {
-  background-color: var(--bg-secondary) !important;
-}
-
-.pixel-popup-table {
-  width: 100%;
-  border-collapse: collapse;
-  margin-top: 6px;
-}
-
-.pixel-popup-table td {
-  padding: 3px 6px;
-  border-bottom: 1px solid var(--border);
-}
-
-.pixel-popup-table tr:last-child td {
-  border-bottom: none;
-}
+/* Nuqta popup'i (sahifalangan, scroll yoʻq) */
+.leaflet-popup-content { margin: 10px 12px; min-width: 260px; }
+.pp { width: 300px; height: 300px; display: flex; flex-direction: column; color: #0f172a; }
+.pp-head { font-weight: 700; margin-bottom: 4px; }
+.pp-body { flex: 1; overflow: hidden; }
+.pp-group { margin-bottom: 6px; }
+.pp-group h5 { font-size: 11px; color: #0369a1; margin-bottom: 2px; }
+.pp-group .src { font-size: 10px; color: #475569; margin-bottom: 2px; word-break: break-all; }
+.pp table { width: 100%; border-collapse: collapse; font-size: 11px; }
+.pp td { padding: 1px 2px; border-bottom: 1px solid #e2e8f0; }
+.pp td:last-child { text-align: right; font-family: var(--mono); }
+.pp-pager { display: flex; align-items: center; justify-content: space-between; gap: 6px; padding-top: 4px; font-size: 11px; }
+.pp-pager button { background: #e2e8f0; color: #0f172a; border-color: #cbd5e1; padding: 1px 8px; }

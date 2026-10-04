@@ -1,163 +1,214 @@
-"""AI provayderlari bilan muloqot qiluvchi yagona interfeys (OpenRouter, OpenAI, Ollama)."""
+"""AI provayderlari uchun yagona interfeys: OpenRouter (standart), OpenAI, Ollama.
 
+Kalit yo'q yoki so'rov muvaffaqiyatsiz bo'lsa — AIReportError ko'tariladi. Hech qanday
+"standart" yoki to'qima hisobot qaytarilmaydi (SIMPLE.md §1: soxta ma'lumot taqiqlanadi).
+"""
+
+import asyncio
 import time
+from collections.abc import Callable
+from typing import Any, Protocol
 
 import httpx
 
 from backend.app.core.config import settings
-from backend.app.core.errors import AppError
+from backend.app.core.errors import AIReportError
 from backend.app.core.telemetry import logger
 from backend.app.usage.tracker import record_api_call
 
+Message = dict[str, str]
 
-class AIClient:
-    """OpenRouter, OpenAI yoki Ollama orqali so'rov yuboruvchi mijoz."""
 
-    def __init__(self) -> None:
-        self.provider = settings.ai_provider
-        self.model = settings.ai_model
+class AIProvider(Protocol):
+    """Bitta AI provayderi: xabarlar ro'yxatini yuborib, javob matnini qaytaradi."""
 
-    async def generate_completion(
-        self,
-        system_prompt: str,
-        user_prompt: str,
-        run_id: int | None = None,
-    ) -> str:
-        """Berilgan promptlar asosida matn (Markdown hisobot) yaratadi."""
-        start_t = time.perf_counter()
+    name: str
 
-        if self.provider == "openrouter":
-            url = "https://openrouter.ai/api/v1/chat/completions"
-            headers = {
-                "Authorization": f"Bearer {settings.openrouter_api_key}",
-                "Content-Type": "application/json",
-            }
-            payload = {
-                "model": self.model or "openrouter/free",
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
-                ],
-                "temperature": 0.2,
-            }
-        elif self.provider == "openai":
-            url = "https://api.openai.com/v1/chat/completions"
-            headers = {
-                "Authorization": f"Bearer {settings.openai_api_key}",
-                "Content-Type": "application/json",
-            }
-            payload = {
-                "model": self.model or "gpt-4o-mini",
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
-                ],
-                "temperature": 0.2,
-            }
-        elif self.provider == "ollama":
-            url = f"{settings.ollama_base_url.rstrip('/')}/api/generate"
-            headers = {"Content-Type": "application/json"}
-            payload = {
-                "model": self.model or "llama3",
-                "system": system_prompt,
-                "prompt": user_prompt,
-                "stream": False,
-            }
-        else:
-            raise AppError(
-                code="AI_PROVIDER_ERROR",
-                message_uz=f"Nomaʼlum AI provayderi: {self.provider}",
-            )
+    def is_configured(self) -> bool: ...
 
-        # Agar API kalit kiritilmagan bo'lsa (OpenRouter yoki OpenAI)
-        if (
-            self.provider in ["openrouter", "openai"]
-            and not settings.openrouter_api_key
-            and not settings.openai_api_key
-        ):
-            logger.warning("AI API kaliti kiritilmagan. Standart tahliliy hisobot tuzilmoqda.")
-            return self._build_deterministic_fallback_report(user_prompt)
+    async def complete(
+        self, messages: list[Message], model: str, run_id: int | None
+    ) -> str: ...
 
+
+class _BaseHTTPProvider:
+    name = "base"
+    timeout_s: float = float(settings.ai_request_timeout_s)
+
+    def __init__(self, client_factory: Callable[[], httpx.AsyncClient] | None = None) -> None:
+        self._client_factory = client_factory or (lambda: httpx.AsyncClient(timeout=self.timeout_s))
+
+    def _url(self) -> str:
+        raise NotImplementedError
+
+    def _headers(self) -> dict[str, str]:
+        return {"Content-Type": "application/json"}
+
+    def _payload(self, messages: list[Message], model: str) -> dict[str, Any]:
+        raise NotImplementedError
+
+    def _parse(self, data: dict[str, Any]) -> tuple[str, int | None, int | None, float | None]:
+        raise NotImplementedError
+
+    async def complete(self, messages: list[Message], model: str, run_id: int | None) -> str:
+        start = time.perf_counter()
+        status, err, content = "success", None, ""
+        tokens_in = tokens_out = None
+        cost = None
+        nbytes = 0
         try:
-            async with httpx.AsyncClient(timeout=60.0) as client:
-                resp = await client.post(url, headers=headers, json=payload)
-                resp.raise_for_status()
-                data = resp.json()
-
-            duration_ms = (time.perf_counter() - start_t) * 1000.0
-
-            if self.provider in ["openrouter", "openai"]:
-                content = data["choices"][0]["message"]["content"]
-                usage = data.get("usage", {})
-                tokens_in = usage.get("prompt_tokens", 0)
-                tokens_out = usage.get("completion_tokens", 0)
-            else:
-                content = data.get("response", "")
-                tokens_in = data.get("prompt_eval_count", 0)
-                tokens_out = data.get("eval_count", 0)
-
+            async with self._client_factory() as client:
+                # Umumiy muddat: provayder keep-alive bo'shliqlari yuborsa ham so'rov cheksiz cho'zilmasin
+                resp = await asyncio.wait_for(
+                    client.post(self._url(), headers=self._headers(), json=self._payload(messages, model)),
+                    timeout=self.timeout_s,
+                )
+                nbytes = len(resp.content)
+                if resp.status_code >= 400:
+                    raise AIReportError(
+                        f"AI provayderi xato qaytardi (HTTP {resp.status_code}): {resp.text[:200]}"
+                    )
+                content, tokens_in, tokens_out, cost = self._parse(resp.json())
+            if not content or not content.strip():
+                raise AIReportError("AI provayderi boʻsh javob qaytardi.")
+            return content
+        except AIReportError as e:
+            status, err = "error", e.message_uz
+            raise
+        except asyncio.CancelledError:
+            status, err = "cancelled", "Vazifa toʻxtatildi"
+            raise
+        except (httpx.TimeoutException, TimeoutError) as e:
+            status, err = "timeout", str(e) or "timeout"
+            raise AIReportError("AI provayderi belgilangan vaqtda javob bermadi.") from e
+        except Exception as e:
+            status, err = "error", str(e)
+            raise AIReportError(f"AI provayderiga ulanib boʻlmadi: {str(e)[:200]}") from e
+        finally:
             await record_api_call(
                 run_id=run_id,
-                service=self.provider,
+                service=self.name,
                 operation="chat/completions",
                 purpose="report_generation",
-                request_summary=f"model={self.model}",
-                status="success",
-                duration_ms=duration_ms,
-                bytes_count=len(resp.content),
+                dataset=model,
+                request=f"model={model}, messages={len(messages)}",
+                status=status,
+                duration_ms=(time.perf_counter() - start) * 1000.0,
+                bytes_count=nbytes,
+                response=f"chars={len(content)}" if content else "",
                 tokens_in=tokens_in,
                 tokens_out=tokens_out,
+                cost_usd=cost,
+                error=err,
             )
-            return content
 
-        except Exception as e:
-            duration_ms = (time.perf_counter() - start_t) * 1000.0
-            logger.error(f"AI so'rovida xatolik: {e}")
-            await record_api_call(
-                run_id=run_id,
-                service=self.provider,
-                operation="chat/completions",
-                purpose="report_generation",
-                status="error",
-                duration_ms=duration_ms,
-                error=str(e),
+
+class OpenAICompatibleProvider(_BaseHTTPProvider):
+    """OpenAI Chat Completions formatidagi provayder (OpenRouter va OpenAI)."""
+
+    def __init__(self, name: str, base_url: str, key_getter: Callable[[], str], **kw: Any) -> None:
+        super().__init__(**kw)
+        self.name = name
+        self._base_url = base_url
+        self._key_getter = key_getter
+
+    def is_configured(self) -> bool:
+        return bool(self._key_getter())
+
+    def _url(self) -> str:
+        return f"{self._base_url}/chat/completions"
+
+    def _headers(self) -> dict[str, str]:
+        h = {"Content-Type": "application/json", "Authorization": f"Bearer {self._key_getter()}"}
+        if self.name == "openrouter":
+            h["X-Title"] = "ZaminTahlil"
+        return h
+
+    def _payload(self, messages: list[Message], model: str) -> dict[str, Any]:
+        return {"model": model, "messages": messages, "temperature": 0.1}
+
+    def _parse(self, data: dict[str, Any]) -> tuple[str, int | None, int | None, float | None]:
+        choices = data.get("choices") or []
+        if not choices:
+            err = data.get("error", {})
+            raise AIReportError(f"AI javobida natija yoʻq: {str(err)[:200]}")
+        content = (choices[0].get("message") or {}).get("content") or ""
+        usage = data.get("usage") or {}
+        cost = usage.get("cost")
+        return content, usage.get("prompt_tokens"), usage.get("completion_tokens"), float(cost) if cost is not None else None
+
+
+class OllamaProvider(_BaseHTTPProvider):
+    """Mahalliy Ollama serveri (/api/chat)."""
+
+    name = "ollama"
+
+    def is_configured(self) -> bool:
+        return bool(settings.ollama_base_url)
+
+    def _url(self) -> str:
+        return f"{settings.ollama_base_url.rstrip('/')}/api/chat"
+
+    def _payload(self, messages: list[Message], model: str) -> dict[str, Any]:
+        return {"model": model, "messages": messages, "stream": False, "options": {"temperature": 0.1}}
+
+    def _parse(self, data: dict[str, Any]) -> tuple[str, int | None, int | None, float | None]:
+        content = (data.get("message") or {}).get("content") or ""
+        return content, data.get("prompt_eval_count"), data.get("eval_count"), None
+
+
+def build_providers() -> dict[str, AIProvider]:
+    """Barcha provayderlar (kalitlar faqat .env dan)."""
+    return {
+        "openrouter": OpenAICompatibleProvider(
+            "openrouter", "https://openrouter.ai/api/v1", lambda: settings.openrouter_api_key
+        ),
+        "openai": OpenAICompatibleProvider("openai", "https://api.openai.com/v1", lambda: settings.openai_api_key),
+        "ollama": OllamaProvider(),
+    }
+
+
+class AIClient:
+    """Provayderni tanlaydi va xabarlar tarixini (history window) cheklaydi."""
+
+    def __init__(self, providers: dict[str, AIProvider] | None = None) -> None:
+        self.providers = providers or build_providers()
+        self._history: dict[str, list[Message]] = {}
+
+    async def generate(
+        self,
+        provider: str,
+        model: str,
+        system_prompt: str,
+        user_prompt: str,
+        history_key: str,
+        history_size: int,
+        run_id: int | None = None,
+    ) -> str:
+        """Hisobot matnini yaratadi. Kontekst: system + shu kalit bo'yicha oxirgi `history_size` xabar."""
+        p = self.providers.get(provider)
+        if p is None:
+            raise AIReportError(f"Nomaʼlum AI provayderi: {provider}", code="AI_PROVIDER_UNKNOWN")
+        if not p.is_configured():
+            raise AIReportError(
+                f"{provider} uchun API kaliti .env faylida sozlanmagan.", code="AI_NOT_CONFIGURED"
             )
-            # Kalit yo'q bo'lsa yoki xato bo'lsa, xom natijalar asosida aniq fallback hisobotini taqdim etamiz
-            return self._build_deterministic_fallback_report(user_prompt)
+        hist = self._history.setdefault(history_key, [])
+        hist.append({"role": "user", "content": user_prompt})
+        del hist[:-history_size]
+        messages = [{"role": "system", "content": system_prompt}, *hist]
+        try:
+            content = await p.complete(messages, model, run_id)
+        except AIReportError:
+            hist.pop()  # muvaffaqiyatsiz so'rov tarixda qolmasin
+            raise
+        hist.append({"role": "assistant", "content": content})
+        del hist[:-history_size]
+        logger.info(f"AI hisobot tayyor ({provider}/{model}, {len(content)} belgi)")
+        return content
 
-    def _build_deterministic_fallback_report(self, numeric_summary_json: str) -> str:
-        """Tashqi LLM mavjud bo'lmaganda raqamli ma'lumotlar asosida to'liq 7 bo'limli o'zbekcha hisobot."""
-        return """# Rekognossirovka Tahliliy Hisoboti
-
-## 1. Umumiy maʼlumot
-Ushbu hudud boʻyicha Google Earth Engine (GEE) orqali koʻp manbali sunʼiy yoʻldosh va meteorologik maʼlumotlar toʻliq qabul qilindi. Kuzatuvlar Sentinel-2, Sentinel-1, Landsat 8/9, SMAP va Copernicus DEM maʼlumotlariga tayanadi. Barcha hisoblashlar sof matematik formulalar asosida amalga oshirilgan.
-
-## 2. Relyef
-Copernicus DEM (GLO-30) maʼlumotlari asosida relyef morfometriyasi baholandi. Horn usuli yordamida nishablik va aspekt xaritalari, shuningdek hillshade, relyef gʻadir-budurlik indeksi (TRI) va topografik joylashuv indeksi (TPI) hisoblab chiqildi. Aniqlangan pastqamliklar yogʻingarchilik davrida suv toʻplanishi mumkin boʻlgan zonalarni koʻrsatadi.
-
-## 3. Yer qoplami
-Mantiqiy qoidalar va spektral indekslar (NDVI, NDWI, MNDWI, NDMI, BSI, NDBI, NBR hamda SAR polarizatsiyalari) asosida hudud 10 ta sinfga ajratildi:
-- Suv va botqoqlik maydonlari aniqlandi.
-- Vegetatsiya qoplami: zich daraxtzorlar, ekin dalalari va siyrak oʻsimliklar ajratildi.
-- Sunʼiy inshootlar: imoratlar, ehtimoliy yoʻl komponentlari va koʻpriklar belgilandi.
-
-## 4. Oʻzgarishlar
-Kuzatuv sanalari oraligʻida spektral indekslarning dinamik oʻzgarishi (ΔNDVI, ΔNDWI, ΔNDMI, ΔVV) tahlil qilindi. Sinflararo oʻtishlar tahlili orqali qaysi maydonlar oʻzgarganligi qayd etildi.
-
-## 5. Ob-havo va taʼsiri
-ERA5-Land soatlik meteorologik tahlili va GFS prognozlari birlashtirildi. Yogʻingarchilik miqdori, tuproqning yuqori qatlami namligi, harorat va shamol tezligi hudud holatiga bevosita taʼsir koʻrsatmoqda.
-
-## 6. Prognoz va xavflar
-Kelgusi 5 kunlik GFS prognozi asosida yuzaga kelishi mumkin boʻlgan agrometeorologik va gidrologik xavflar baholandi:
-- Kuchli yogʻingarchilikda pastqam joylarda botqoqlanish ehtimoli;
-- Termal oʻzgarishlar va shamol yuklamalari.
-
-## 7. Maʼlumot sifati va cheklovlar
-Barcha qatlamlar uchun yaroqli piksellar foizi (valid %) va bulutlilik darajasi hisoblangan. 30% dan kam yaroqli pikselga ega qatlamlar "past ishonchlilik" sifatida belgilandi. Sunʼiy yoki interpolatsiya qilingan qiymatlar mavjud emas.
-
----
-*Izoh: Ushbu hisobot ZaminTahlil tizimining qoidaviy tahlilatori tomonidan raqamli maʼlumotlar asosida tuzildi.*
-"""
+    def forget(self, history_key: str) -> None:
+        self._history.pop(history_key, None)
 
 
 ai_client = AIClient()

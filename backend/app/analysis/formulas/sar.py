@@ -7,7 +7,7 @@ Barcha funksiyalar float32 massivlarida ishlaydi.
 import numpy as np
 from scipy.ndimage import uniform_filter
 
-from backend.app.core.constants import WATER_VV_MAX_DB
+from backend.app.core.constants import LEE_ENL, LEE_WINDOW, WATER_VV_MAX_DB
 
 
 def db_to_linear(val_db: np.ndarray) -> np.ndarray:
@@ -28,14 +28,17 @@ def linear_to_db(val_lin: np.ndarray) -> np.ndarray:
     return res.astype(np.float32)
 
 
-def lee_filter_5x5(img: np.ndarray, enl: float = 4.0) -> np.ndarray:
+def lee_filter_5x5(img: np.ndarray, enl: float = LEE_ENL, size: int = LEE_WINDOW) -> np.ndarray:
     """5x5 o'lchamli Lee speckle filtri (SAR shovqinini tozalash).
 
+    Kirish: CHIZIQLI quvvat birligidagi massiv (dB emas!).
     Formula:
         Mahalliy o'rtacha mu va dispersiya var 5x5 darchada hisoblanadi.
-        Og'irlik: W = max(0, 1 - (Cu^2 / Ci^2))
+        Ci^2 = var / mu^2, Cu^2 = 1 / ENL
+        Og'irlik: W = max(0, (Ci^2 - Cu^2) / Ci^2)
         Filtered = mu + W * (img - mu)
-    Ishlatiladigan parametrlar: ENL (Equivalent Number of Looks), standart 4.0.
+    Parametr: ENL (Equivalent Number of Looks), Sentinel-1 IW GRDH uchun ≈ 4.4.
+    NaN piksellar natijada ham NaN qoladi.
     """
     valid_mask = ~np.isnan(img)
     if not np.any(valid_mask):
@@ -46,8 +49,8 @@ def lee_filter_5x5(img: np.ndarray, enl: float = 4.0) -> np.ndarray:
     filled = np.where(valid_mask, img, fill_val)
 
     # 5x5 o'rtacha va kvadrat o'rtacha
-    mean_val = uniform_filter(filled, size=5, mode="reflect")
-    mean_sq = uniform_filter(filled**2, size=5, mode="reflect")
+    mean_val = uniform_filter(filled, size=size, mode="reflect")
+    mean_sq = uniform_filter(filled**2, size=size, mode="reflect")
     variance = np.maximum(mean_sq - mean_val**2, 0.0)
 
     # Shovqin koeffitsiyenti
@@ -83,16 +86,21 @@ def compute_rvi(vh_db: np.ndarray, vv_db: np.ndarray) -> np.ndarray:
     vv_lin = db_to_linear(vv_db)
     denom = vv_lin + vh_lin
     with np.errstate(divide="ignore", invalid="ignore"):
-        rvi = np.where(denom <= 1e-7, np.nan, (4.0 * vh_lin) / denom)
-    return np.clip(rvi, 0.0, 1.0).astype(np.float32)
+        rvi = np.where(denom <= 1e-12, np.nan, (4.0 * vh_lin) / denom)
+    return rvi.astype(np.float32)
 
 
 def compute_sar_water_mask(vv_db: np.ndarray, threshold_db: float = WATER_VV_MAX_DB) -> np.ndarray:
     """SAR orqali suv yuzasini aniqlash niqobi (barcha ob-havoda ishlaydi).
 
-    Formula: VV_db < threshold_db (odatda -15.0 dB)
+    Formula: 1 agar VV_db < threshold_db (standart -15.0 dB), aks holda 0; VV yo'q bo'lsa NaN.
     Suv yuzasi silliq bo'lgani uchun radarni o'zidan qaytaradi va qaytgan signal juda past bo'ladi.
     """
     with np.errstate(invalid="ignore"):
-        mask = np.where(np.isnan(vv_db), 0.0, (vv_db < threshold_db).astype(np.float32))
-    return mask
+        mask = np.where(np.isnan(vv_db), np.nan, (vv_db < threshold_db).astype(np.float32))
+    return mask.astype(np.float32)
+
+
+def lee_filter_db(val_db: np.ndarray) -> np.ndarray:
+    """dB massivga Lee filtrini to'g'ri qo'llaydi: dB → chiziqli → Lee 5x5 → dB."""
+    return linear_to_db(lee_filter_5x5(db_to_linear(val_db)))

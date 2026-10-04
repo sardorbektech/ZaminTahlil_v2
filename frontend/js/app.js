@@ -1,477 +1,304 @@
 /**
- * ZaminTahlil v2 — Asosiy Frontend ilovasi (app.js).
+ * ZaminTahlil frontend — faqat koʻrsatish va boshqaruv; barcha hisoblashlar backendda (/api/v1).
+ * Holatlar: idle → ready → running → done | cancelled | error. Ishlayotganda faqat «Toʻxtatish» faol.
  */
-
-import {
-  checkActiveRun,
-  startRecon,
-  cancelRecon,
-  fetchReconLayers,
-  fetchClassDistribution,
-  fetchWeatherData,
-  fetchSatellitesData,
-  fetchAIReport,
-  regenerateAIReport,
-  fetchUsageSummary,
-  fetchSettings,
-  updateSettings,
-} from "./api/client.js";
-import { listenToReconEvents } from "./api/sse.js";
-import { i18n } from "./i18n/uz.js";
-import {
-  initMap,
-  drawShape,
-  clearAoiLayer,
-  getCurrentAoiLayer,
-  getMapInstance,
-} from "./map/leaflet_init.js";
-import { addImageLayerToMap, removeAllOverlays, setLayerOpacity, toggleLayerVisibility } from "./map/overlays.js";
-import { startScanAnimation, stopScanAnimation } from "./map/scan_animation.js";
-import { AppState, stateManager } from "./state.js";
-import { setupDateSlider } from "./ui/date_slider.js";
-import { downloadReportAsFile, renderMarkdownReport } from "./ui/report_view.js";
+import { api } from "./api/client.js";
+import { listenRun } from "./api/sse.js";
+import { applyI18n, uz } from "./i18n/uz.js";
+import { areaKm2, clearAoi, drawShape, geometry, getAoiLayer, getMap, initMap, setMapLocked, showAoi } from "./map/leaflet_init.js";
+import { initOverlays, setBounds } from "./map/overlays.js";
+import { openPixelPopup } from "./map/pixel_popup.js";
+import { startScan, stopScan } from "./map/scan_animation.js";
+import { S, store } from "./state.js";
+import { clearDates, initDateSlider, setDates } from "./ui/date_slider.js";
+import { loadInfo, resetInfo, setInfoDate } from "./ui/info_panel.js";
+import { initLayersPanel, loadLayers, resetLayers, setLayersDate, setLayersLocked } from "./ui/layers_panel.js";
+import { repaginateAll } from "./ui/paginate.js";
+import { downloadReport, renderReport, renderUsage, reportGenerating } from "./ui/report_view.js";
+import { loadSatellites, resetSatellites } from "./ui/satellites_panel.js";
+import { initSettings, openSettings } from "./ui/settings_modal.js";
 import { initTabs } from "./ui/tabs.js";
+import { toast } from "./ui/toast.js";
+import { loadWeather, resetWeather } from "./ui/weather_panel.js";
 
-let sseConnection = null;
-let currentReportMarkdown = "";
+const LAST_RUN_KEY = "zt:lastRun";
+let sse = null;
+let lockedEls = [];
 
-document.addEventListener("DOMContentLoaded", async () => {
-  initTabs();
-  setupUIEventListeners();
+const $ = (id) => document.getElementById(id);
 
-  // 1. Xaritani ishga tushirish
-  const map = initMap((geoJson, layer) => {
-    // Hudud chizilganda
-    const coords = geoJson.geometry.coordinates[0];
-    const areaKm2 = calculatePolygonArea(coords);
-    updateAreaBadge(areaKm2);
-
-    if (areaKm2 > 100.0) {
-      showToast(i18n.toasts.aoi_too_large);
-      stateManager.setState(AppState.IDLE);
-    } else {
-      stateManager.setState(AppState.READY, { aoi: geoJson.geometry, areaKm2 });
-    }
-  });
-
-  // 2. Holat o'zgarganda UI ni yangilash
-  stateManager.subscribe(updateUIForState);
-
-  // 3. Faol ish bor-yo'qligini tekshirish (Reload bo'lganda)
-  try {
-    const activeData = await checkActiveRun();
-    if (activeData.active && activeData.run) {
-      stateManager.setState(AppState.RUNNING, { runId: activeData.run.id, areaKm2: activeData.run.area_km2 });
-      startProgressTracking(activeData.run.id);
-    }
-  } catch (e) {
-    console.warn("Active run tekshirishda xato:", e);
-  }
-});
-
-function setupUIEventListeners() {
-  const btnRect = document.getElementById("btn-draw-rect");
-  const btnPoly = document.getElementById("btn-draw-poly");
-  const btnClear = document.getElementById("btn-clear");
-  const btnRecon = document.getElementById("btn-recon");
-  const btnStop = document.getElementById("btn-stop");
-  const btnSettings = document.getElementById("btn-settings");
-
-  btnRect?.addEventListener("click", () => drawShape("Rectangle"));
-  btnPoly?.addEventListener("click", () => drawShape("Polygon"));
-
-  btnClear?.addEventListener("click", () => {
-    clearAoiLayer();
-    removeAllOverlays(getMapInstance());
-    updateAreaBadge(0);
-    stateManager.setState(AppState.IDLE, { aoi: null, areaKm2: 0 });
-  });
-
-  btnRecon?.addEventListener("click", async () => {
-    const aoi = stateManager.currentAoi;
-    if (!aoi) {
-      showToast(i18n.toasts.no_aoi);
-      return;
-    }
-
-    try {
-      stateManager.setState(AppState.RUNNING);
-      const res = await startRecon(aoi);
-      stateManager.setState(AppState.RUNNING, { runId: res.run_id });
-      showToast(i18n.toasts.job_started);
-      startProgressTracking(res.run_id);
-    } catch (err) {
-      showToast(err.message);
-      stateManager.setState(AppState.ERROR);
-    }
-  });
-
-  btnStop?.addEventListener("click", async () => {
-    const runId = stateManager.currentRunId;
-    if (runId) {
-      await cancelRecon(runId);
-      if (sseConnection) sseConnection.close();
-      stopScanAnimation(getCurrentAoiLayer());
-      removeAllOverlays(getMapInstance());
-      showToast(i18n.toasts.job_cancelled);
-      stateManager.setState(AppState.CANCELLED);
-    }
-  });
-
-  // Sozlamalar modali
-  btnSettings?.addEventListener("click", openSettingsModal);
-  document.getElementById("btn-close-settings")?.addEventListener("click", closeSettingsModal);
-  document.getElementById("btn-save-settings")?.addEventListener("click", saveSettingsForm);
-
-  // Hisobot yuklab olish
-  document.getElementById("btn-download-report")?.addEventListener("click", () => {
-    if (currentReportMarkdown) {
-      downloadReportAsFile(`ZaminTahlil_Hisobot_${stateManager.currentRunId}.md`, currentReportMarkdown);
-    }
-  });
-
-  // Hisobotni qayta generatsiya qilish
-  document.getElementById("btn-regen-report")?.addEventListener("click", async () => {
-    const runId = stateManager.currentRunId;
-    if (!runId) return;
-    const reportBox = document.getElementById("report-content");
-    reportBox.innerHTML = `<i>${i18n.report.generating}</i>`;
-    try {
-      const res = await regenerateAIReport(runId);
-      currentReportMarkdown = res.content_md;
-      renderMarkdownReport("report-content", currentReportMarkdown);
-    } catch (e) {
-      showToast("Hisobotni qayta tuzishda xatolik");
-    }
-  });
+function remember(id) {
+  try { id ? localStorage.setItem(LAST_RUN_KEY, String(id)) : localStorage.removeItem(LAST_RUN_KEY); } catch (_e) { /* saqlab boʻlmadi */ }
 }
 
-function updateUIForState({ state, areaKm2 }) {
-  const isRunning = state === AppState.RUNNING;
-  const isReady = state === AppState.READY;
+function recall() {
+  try { return parseInt(localStorage.getItem(LAST_RUN_KEY) || "", 10) || null; } catch (_e) { return null; }
+}
 
-  // Tugmalar blokirovkasi
-  document.getElementById("btn-draw-rect").disabled = isRunning;
-  document.getElementById("btn-draw-poly").disabled = isRunning;
-  document.getElementById("btn-clear").disabled = isRunning;
-  document.getElementById("btn-settings").disabled = isRunning;
-
-  const btnRecon = document.getElementById("btn-recon");
-  btnRecon.disabled = !isReady || isRunning;
-
-  const btnStop = document.getElementById("btn-stop");
-  btnStop.disabled = !isRunning;
-
-  const progressContainer = document.getElementById("progress-container");
-  if (isRunning) {
-    progressContainer.style.display = "block";
-    startScanAnimation(getCurrentAoiLayer());
+// ---------------------------------------------------------------------------
+// UI qulfi va holat
+// ---------------------------------------------------------------------------
+function setLocked(locked) {
+  document.body.classList.toggle("locked", locked);
+  setMapLocked(locked);
+  setLayersLocked(locked);
+  if (locked) {
+    lockedEls = Array.from(document.querySelectorAll("#app button, #app input, #app select")).filter(
+      (el) => el.id !== "btn-stop" && !el.disabled,
+    );
+    lockedEls.forEach((el) => (el.disabled = true));
   } else {
-    progressContainer.style.display = "none";
-    stopScanAnimation(getCurrentAoiLayer());
+    lockedEls.forEach((el) => (el.disabled = false));
+    lockedEls = [];
   }
 }
 
-function startProgressTracking(runId) {
-  const progressBar = document.getElementById("progress-bar-fill");
-
-  sseConnection = listenToReconEvents(
-    runId,
-    (eventData) => {
-      const pct = (eventData.stage / eventData.total_stages) * 100;
-      progressBar.style.width = `${pct}%`;
-
-      if (eventData.message_uz === "Yangi sunʼiy yoʻldosh maʼlumoti yoʻq") {
-        showToast(i18n.toasts.no_new_data);
-      }
-
-      if (eventData.stage === 10) {
-        stateManager.setState(AppState.DONE, { runId });
-        showToast(i18n.toasts.job_completed);
-        loadReconResults(runId);
-      }
-    },
-    (err) => {
-      console.warn("SSE xatolik:", err);
-    }
-  );
+function updateUI() {
+  const running = store.state === S.RUNNING;
+  if (running !== document.body.classList.contains("locked")) setLocked(running);
+  $("state-badge").textContent = uz.states[store.state];
+  $("btn-stop").disabled = !running;
+  if (!running) {
+    $("btn-recon").disabled = !store.aoi || store.areaKm2 > store.maxAoiKm2;
+  }
+  const map = getMap();
+  if (running) startScan(map, getAoiLayer());
+  else stopScan(map);
 }
 
-async function loadReconResults(runId) {
-  const map = getMapInstance();
-  const aoiLayer = getCurrentAoiLayer();
-  const bounds = aoiLayer ? aoiLayer.getBounds() : map.getBounds();
-
-  // 1. Qatlamlarni yuklash
-  try {
-    const layers = await fetchReconLayers(runId);
-    renderLayersTab(layers, bounds);
-  } catch (e) {
-    console.warn("Qatlamlarni yuklashda xato:", e);
-  }
-
-  // 2. Yer qoplami maydonlarini yuklash
-  try {
-    const classes = await fetchClassDistribution(runId);
-    renderInfoTab(classes);
-  } catch (e) {
-    console.warn("Ma'lumotlarni yuklashda xato:", e);
-  }
-
-  // 3. Ob-havo
-  try {
-    const weather = await fetchWeatherData(runId);
-    renderWeatherTab(weather);
-  } catch (e) {
-    console.warn("Ob-havoni yuklashda xato:", e);
-  }
-
-  // 4. Sun'iy yo'ldoshlar
-  try {
-    const satellites = await fetchSatellitesData(runId);
-    renderSatellitesTab(satellites);
-    // Slayderni sozlash
-    const dateEntries = satellites.map((s) => ({
-      label: s.acq_time_local,
-      ts: s.acq_time_ts,
-    }));
-    setupDateSlider(dateEntries, (sel) => {
-      console.log("Tanlangan sana:", sel);
-    });
-  } catch (e) {
-    console.warn("Sun'iy yo'ldoshlarni yuklashda xato:", e);
-  }
-
-  // 5. Hisobot
-  try {
-    const rep = await fetchAIReport(runId);
-    currentReportMarkdown = rep.content_md;
-    renderMarkdownReport("report-content", currentReportMarkdown);
-  } catch (e) {
-    console.warn("Hisobotni yuklashda xato:", e);
-  }
-
-  // 6. Nazorat
-  try {
-    const usage = await fetchUsageSummary(runId);
-    renderUsageTab(usage);
-  } catch (e) {
-    console.warn("Usage yuklashda xato:", e);
-  }
+function setProgress(frac, text) {
+  $("progress-fill").style.width = `${Math.round((frac || 0) * 100)}%`;
+  $("progress-text").textContent = text || uz.bottom.progress_idle;
 }
 
-function renderLayersTab(layers, bounds) {
-  const container = document.getElementById("layers-list");
-  container.innerHTML = "";
-  const map = getMapInstance();
+// ---------------------------------------------------------------------------
+// Natijalar
+// ---------------------------------------------------------------------------
+function clearResults() {
+  getMap()?.closePopup();
+  resetLayers(); // overlaylar olib tashlanadi, object URL lar revoke qilinadi
+  resetInfo();
+  resetWeather();
+  resetSatellites();
+  renderReport(null, null);
+  renderUsage(null);
+  clearDates();
+  store.patch({ runId: null });
+}
 
-  const layerNamesUz = {
-    1: "Tabiiy ranglar (RGB)",
-    2: "NDVI (Vegetatsiya)",
-    5: "NDWI (Suv indeksi)",
-    11: "SAR VV polarizatsiya",
-    15: "LST (Yer sirti harorati)",
-    16: "Balandlik (DEM)",
-    17: "Nishablik (Slope)",
-    19: "Relyef soyasi (Hillshade)",
-    22: "Yer qoplami (Landcover)",
-  };
+async function loadResults(runId) {
+  const run = await api.run(runId);
+  if (run.status !== "completed") throw new Error(run.error?.message_uz || uz.states.error);
+  store.patch({ runId });
+  remember(runId);
+  setBounds(L.latLngBounds(run.bounds_latlon));
+  const date = setDates(run.observation_dates);
+  const [layers, classes, changes, sats, weather, usage] = await Promise.all([
+    api.layers(runId), api.classes(runId), api.changes(runId), api.satellites(runId), api.weather(runId), api.usage(runId),
+  ]);
+  setLayersDate(date);
+  setInfoDate(date);
+  loadLayers(runId, layers.layers);
+  loadInfo({ run, summary: run, classes, changes, sats });
+  loadWeather(weather);
+  loadSatellites(sats);
+  renderUsage(usage);
+  let rep = null;
+  try { rep = await api.report(runId); } catch (_e) { rep = null; }
+  renderReport(rep, runId);
+  return run;
+}
 
-  layers.forEach((l) => {
-    const nameUz = layerNamesUz[l.kind] || `Qatlam #${l.id}`;
-    const div = document.createElement("div");
-    div.className = "layer-item";
-    div.innerHTML = `
-      <div class="layer-header">
-        <label style="display:flex; align-items:center; gap:6px; cursor:pointer;">
-          <input type="checkbox" class="layer-toggle" data-id="${l.id}">
-          <span class="layer-title">${nameUz}</span>
-        </label>
-        <span style="font-size:11px; color:#94a3b8;">${l.acq_time_local}</span>
-      </div>
-      <div class="layer-controls">
-        <span style="font-size:11px;">Shaffoflik:</span>
-        <input type="range" class="opacity-slider" data-id="${l.id}" min="0" max="1" step="0.05" value="0.85">
-      </div>
-    `;
-
-    // Checkbox bosilganda xaritaga qo'shish/yashirish
-    const toggle = div.querySelector(".layer-toggle");
-    const slider = div.querySelector(".opacity-slider");
-
-    toggle.addEventListener("change", (e) => {
-      if (e.target.checked) {
-        addImageLayerToMap(map, l.id, l.image_url, bounds, parseFloat(slider.value));
-      } else {
-        toggleLayerVisibility(map, l.id, false);
-      }
-    });
-
-    slider.addEventListener("input", (e) => {
-      setLayerOpacity(l.id, parseFloat(e.target.value));
-    });
-
-    container.appendChild(div);
+// ---------------------------------------------------------------------------
+// Run oqimi
+// ---------------------------------------------------------------------------
+function follow(runId) {
+  sse?.close();
+  sse = listenRun(runId, (ev) => onEvent(runId, ev), () => {
+    if (store.state === S.RUNNING) toast(uz.toasts.connection_lost, "error");
   });
 }
 
-function renderInfoTab(classes) {
-  const container = document.getElementById("info-content");
-  if (!classes || classes.length === 0) {
-    container.innerHTML = `<p style="color:#94a3b8;">${i18n.info.no_data}</p>`;
+async function onEvent(runId, ev) {
+  switch (ev.type) {
+    case "progress":
+      setProgress(ev.progress, `${ev.stage}/${ev.total_stages} · ${ev.message_uz}`);
+      break;
+    case "failover":
+      toast(uz.toasts.failover, "warn");
+      break;
+    case "warning":
+      toast(ev.message_uz, "warn", 6000);
+      break;
+    case "duplicate": {
+      toast(uz.toasts.no_new_data, "info", 5000);
+      const existing = ev.data.existing_run_id;
+      setProgress(1, uz.toasts.no_new_data);
+      store.set(S.DONE);
+      try { await loadResults(existing); } catch (e) { toast(e.message, "error"); }
+      break;
+    }
+    case "done":
+      setProgress(1, ev.message_uz);
+      store.set(S.DONE);
+      toast(uz.toasts.done);
+      try { await loadResults(runId); } catch (e) { toast(e.message, "error"); }
+      break;
+    case "error":
+      setProgress(0, ev.message_uz);
+      toast(ev.message_uz, "error", 7000);
+      store.set(S.ERROR);
+      clearResults();
+      break;
+    case "cancelled":
+      onCancelled();
+      break;
+    default:
+      break;
+  }
+}
+
+function onCancelled() {
+  sse?.close();
+  if (store.state !== S.RUNNING) return;
+  clearResults();
+  setProgress(0, uz.toasts.cancelled);
+  store.set(S.CANCELLED);
+  toast(uz.toasts.cancelled);
+}
+
+async function startRecon() {
+  const aoi = geometry();
+  if (!aoi) {
+    toast(uz.toasts.no_aoi, "warn");
     return;
   }
-
-  const rows = classes
-    .map(
-      (c) => `
-    <tr>
-      <td>${c.label_uz}</td>
-      <td style="text-align:right;">${c.area_ha} ga</td>
-      <td style="text-align:right;"><b>${c.pct}%</b></td>
-    </tr>
-  `
-    )
-    .join("");
-
-  container.innerHTML = `
-    <h4 style="margin-bottom:10px; color:#38bdf8;">${i18n.info.landcover_title}</h4>
-    <table class="pixel-popup-table" style="width:100%;">
-      <thead>
-        <tr style="color:#94a3b8; font-size:11px;">
-          <th style="text-align:left;">Sinf</th>
-          <th style="text-align:right;">Maydon</th>
-          <th style="text-align:right;">Ulush</th>
-        </tr>
-      </thead>
-      <tbody>${rows}</tbody>
-    </table>
-  `;
-}
-
-function renderWeatherTab(weather) {
-  const container = document.getElementById("weather-content");
-  const impacts = weather.impact_statements || [];
-
-  const impactCards = impacts
-    .map(
-      (imp) => `
-    <div style="background:#0f172a; border-left:3px solid #38bdf8; padding:8px 10px; margin-bottom:8px; border-radius:4px;">
-      <div style="font-size:12px;">${imp.message_uz}</div>
-    </div>
-  `
-    )
-    .join("");
-
-  container.innerHTML = `
-    <h4 style="margin-bottom:10px; color:#38bdf8;">${i18n.weather.impact_title}</h4>
-    ${impactCards || "<p style='color:#94a3b8;'>Ob-havo taʼsiri xulosalari mavjud emas</p>"}
-  `;
-}
-
-function renderSatellitesTab(satellites) {
-  const container = document.getElementById("satellites-content");
-  const rows = satellites
-    .map(
-      (s) => `
-    <tr>
-      <td><b>${s.sensor_name}</b></td>
-      <td style="font-family:monospace; font-size:11px;">${s.scene_id.substring(0, 18)}...</td>
-      <td>${s.acq_time_local}</td>
-      <td style="text-align:right;">${s.cloud_pct}%</td>
-    </tr>
-  `
-    )
-    .join("");
-
-  container.innerHTML = `
-    <h4 style="margin-bottom:10px; color:#38bdf8;">${i18n.satellites.title}</h4>
-    <table class="pixel-popup-table" style="width:100%;">
-      <thead>
-        <tr style="color:#94a3b8; font-size:11px;">
-          <th style="text-align:left;">Sensor</th>
-          <th style="text-align:left;">Kadr</th>
-          <th style="text-align:left;">Sana</th>
-          <th style="text-align:right;">Bulut</th>
-        </tr>
-      </thead>
-      <tbody>${rows}</tbody>
-    </table>
-  `;
-}
-
-function renderUsageTab(usage) {
-  const container = document.getElementById("usage-content");
-  if (usage.markdown_report && window.marked) {
-    container.innerHTML = window.marked.parse(usage.markdown_report);
-  } else {
-    container.innerHTML = `<pre style="font-size:11px; white-space:pre-wrap;">${JSON.stringify(usage, null, 2)}</pre>`;
-  }
-}
-
-async function openSettingsModal() {
-  const modal = document.getElementById("settings-modal");
-  modal.style.display = "flex";
+  clearResults();
+  getMap().pm.disableDraw();
+  store.set(S.RUNNING, { aoi });
+  setProgress(0, uz.toasts.started);
   try {
-    const s = await fetchSettings();
-    document.getElementById("input-lookback").value = s.lookback_days || 10;
-    document.getElementById("input-max-cloud").value = s.max_scene_cloud_pct || 40;
-    document.getElementById("input-resolution").value = s.analysis_resolution_m || 10;
+    const res = await api.startRecon(aoi);
+    store.patch({ runId: null, activeRunId: res.run_id });
+    toast(uz.toasts.started);
+    follow(res.run_id);
   } catch (e) {
-    console.warn(e);
+    toast(e.message, "error", 6000);
+    setProgress(0, e.message);
+    store.set(S.ERROR);
   }
 }
 
-function closeSettingsModal() {
-  document.getElementById("settings-modal").style.display = "none";
+async function stopRecon() {
+  const id = store.activeRunId;
+  if (!id) return;
+  $("btn-stop").disabled = true;
+  try {
+    await api.cancel(id);
+  } catch (e) {
+    toast(e.message, "error");
+  }
+  onCancelled();
 }
 
-async function saveSettingsForm() {
-  const lookback = parseInt(document.getElementById("input-lookback").value, 10);
-  const cloud = parseFloat(document.getElementById("input-max-cloud").value);
-  const res = parseFloat(document.getElementById("input-resolution").value);
-
-  await updateSettings({
-    lookback_days: lookback,
-    max_scene_cloud_pct: cloud,
-    analysis_resolution_m: res,
-  });
-
-  closeSettingsModal();
-  showToast("Sozlamalar saqlandi");
+// ---------------------------------------------------------------------------
+// Ishga tushirish
+// ---------------------------------------------------------------------------
+function onAoi(geom) {
+  const area = areaKm2(geom);
+  $("area-badge").textContent = `${area.toFixed(2)} ${uz.common.km2}`;
+  if (store.state === S.RUNNING) return;
+  if (area > store.maxAoiKm2) toast(uz.toasts.aoi_too_large(store.maxAoiKm2), "warn");
+  store.set(geom ? S.READY : S.IDLE, { aoi: geom, areaKm2: area });
 }
 
-function updateAreaBadge(km2) {
-  const badge = document.getElementById("area-badge");
-  if (badge) {
-    badge.textContent = `${km2.toFixed(2)} km²`;
+function onMapClick(e) {
+  if (store.state === S.RUNNING || !store.runId) return;
+  if (getMap().pm.globalDrawModeEnabled()) return;
+  openPixelPopup(getMap(), e.latlng, store.runId);
+}
+
+function onDate(ts) {
+  setLayersDate(ts);
+  setInfoDate(ts);
+}
+
+async function generateReport() {
+  const id = store.runId;
+  if (!id) return;
+  reportGenerating();
+  try {
+    renderReport(await api.generateReport(id), id);
+    toast(uz.toasts.report_ready);
+  } catch (e) {
+    toast(e.code === "REPORT_EXISTS" ? uz.report.exists : e.message, e.code === "REPORT_EXISTS" ? "info" : "error", 6000);
+    let rep = null;
+    try { rep = await api.report(id); } catch (_e) { rep = null; }
+    renderReport(rep, id);
   }
 }
 
-function showToast(msg) {
-  const container = document.getElementById("toast-container");
-  if (!container) return;
-  const t = document.createElement("div");
-  t.className = "toast";
-  t.textContent = msg;
-  container.appendChild(t);
-  setTimeout(() => {
-    if (t.parentNode) t.parentNode.removeChild(t);
-  }, 3000);
+async function restore() {
+  try {
+    const a = await api.active();
+    if (a.active && a.run) {
+      showAoi(a.run.aoi);
+      store.patch({ aoi: a.run.aoi, areaKm2: a.run.area_km2 });
+      $("area-badge").textContent = `${(a.run.area_km2 || 0).toFixed(2)} ${uz.common.km2}`;
+      store.set(S.RUNNING, { activeRunId: a.run.id });
+      setProgress(a.run.progress, `${a.run.stage}/10`);
+      follow(a.run.id);
+      return;
+    }
+  } catch (_e) { /* server javob bermadi */ }
+  const last = recall();
+  if (!last) return;
+  try {
+    const run = await api.run(last);
+    if (run.status !== "completed") return;
+    showAoi(run.aoi);
+    store.patch({ aoi: run.aoi, areaKm2: run.area_km2 });
+    $("area-badge").textContent = `${run.area_km2.toFixed(2)} ${uz.common.km2}`;
+    store.set(S.DONE);
+    await loadResults(last);
+    setProgress(1, uz.states.done);
+  } catch (_e) {
+    remember(null);
+  }
 }
 
-function calculatePolygonArea(coords) {
-  if (coords.length < 3) return 0;
-  let area = 0;
-  for (let i = 0; i < coords.length; i++) {
-    const p1 = coords[i];
-    const p2 = coords[(i + 1) % coords.length];
-    const lon1 = (p1[0] * Math.PI) / 180;
-    const lat1 = (p1[1] * Math.PI) / 180;
-    const lon2 = (p2[0] * Math.PI) / 180;
-    const lat2 = (p2[1] * Math.PI) / 180;
-    area += (lon2 - lon1) * (2 + Math.sin(lat1) + Math.sin(lat2));
-  }
-  const areaM2 = Math.abs((area * 6378137 * 6378137) / 2);
-  return areaM2 / 1000000;
-}
+document.addEventListener("DOMContentLoaded", async () => {
+  applyI18n();
+  initTabs();
+  const map = initMap(onAoi, onMapClick);
+  initOverlays(map);
+  initLayersPanel();
+  initDateSlider(onDate);
+  initSettings((res) => store.patch({ maxAoiKm2: res.settings.max_aoi_km2 }));
+  clearResults();
+
+  $("btn-draw-rect").onclick = () => drawShape("rect");
+  $("btn-draw-poly").onclick = () => drawShape("poly");
+  $("btn-clear").onclick = () => {
+    clearAoi();
+    clearResults();
+    remember(null);
+    $("area-badge").textContent = `0.00 ${uz.common.km2}`;
+    setProgress(0, "");
+    store.set(S.IDLE, { aoi: null, areaKm2: 0 });
+  };
+  $("btn-recon").onclick = startRecon;
+  $("btn-stop").onclick = stopRecon;
+  $("btn-settings").onclick = openSettings;
+  $("btn-report-gen").onclick = generateReport;
+  $("btn-report-dl").onclick = downloadReport;
+
+  store.on(updateUI);
+  try {
+    const s = await api.getSettings();
+    store.patch({ maxAoiKm2: s.settings.max_aoi_km2 });
+  } catch (_e) { /* standart chegarada qoladi */ }
+  updateUI();
+  await restore();
+  repaginateAll();
+});

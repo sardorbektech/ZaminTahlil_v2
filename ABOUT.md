@@ -19,12 +19,12 @@ ZaminTahlil is an automated, high-precision area reconnaissance and terrain anal
 - **Cloud Score+ (`GOOGLE/CLOUD_SCORE_PLUS/V1/S2_HARMONIZED`):** Band `cs_cdf` (cloud score threshold default 0.60).
 - **Sentinel-1 GRD IW (`COPERNICUS/S1_GRD`):** VV, VH (already in decibels, converted to linear for RVI).
 - **Landsat 8 & 9 L2 (`LANDSAT/LC08/C02/T1_L2`, `LANDSAT/LC09/C02/T1_L2`):** Bands SR_B2-SR_B7 (DN * 0.0000275 - 0.2), ST_B10 (DN * 0.00341802 + 149.0 - 273.15 °C), QA_PIXEL.
-- **SMAP L4 (`NASA/SMAP/SPL4SMGP/007`):** Bands `sm_surface`, `sm_rootzone`.
-- **Copernicus DEM (`COPERNICUS/DEM/GLO30`):** Band `DEM` (elevation in meters).
+- **SMAP L4 (`NASA/SMAP/SPL4SMGP/008`):** Bands `sm_surface`, `sm_rootzone`.
+- **Copernicus DEM (`COPERNICUS/DEM/GLO30_2024_1`):** Band `DEM` (elevation in meters).
 - **Weather Datasets:**
   - Past hourly: `ECMWF/ERA5_LAND/HOURLY`
   - Near real-time & forecast: `NOAA/GFS0P25`
-  - Daily precipitation: `UCSB-CHC/CHIRPS/V3/DAILY`
+  - Daily precipitation: `UCSB-CHC/CHIRPS/V3/DAILY_SAT`
 
 ## 4. Pipeline Workflow (`pipeline/recon.py`)
 1. **Validate AOI:** Check GeoJSON polygon validity and ensure total area ≤ 100 km².

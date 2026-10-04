@@ -26,3 +26,7 @@ data/logs/
 *.sqlite-wal
 *.sqlite-shm
 *.npz
+
+# Maxfiy kalit fayllari
+secrets/
+*.egg-info/

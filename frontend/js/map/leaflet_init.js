@@ -1,83 +1,87 @@
-/**
- * Leaflet xaritasini initsializatsiya qilish, Esri basemap va chizish vositalari.
- */
+/** Leaflet xaritasi: yagona basemap (Esri World Imagery, 2D) va AOI chizish (Leaflet-Geoman). */
 
-import { AppState, stateManager } from "../state.js";
-import { handleMapClick } from "./pixel_popup.js";
+let map = null;
+let aoiLayer = null;
+let onAoi = null;
 
-let mapInstance = null;
-let currentAoiLayer = null;
+const AOI_STYLE = { color: "#38bdf8", weight: 2, fillColor: "#38bdf8", fillOpacity: 0.08 };
 
-export function initMap(onAoiCreated) {
-  // Toshkent koordinatalari bo'yicha markazlashtirish
-  mapInstance = L.map("map", {
-    center: [41.3111, 69.2797],
-    zoom: 11,
-    zoomControl: false,
-    attributionControl: false,
+export function initMap(onAoiChanged, onMapClick) {
+  onAoi = onAoiChanged;
+  map = L.map("map", { center: [41.3111, 69.2797], zoom: 12, zoomControl: false, preferCanvas: false });
+  L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}", {
+    maxZoom: 19,
+    attribution: "Tiles © Esri — Source: Esri, Maxar, Earthstar Geographics",
+  }).addTo(map);
+  L.control.zoom({ position: "bottomright" }).addTo(map);
+  L.control.scale({ position: "bottomleft", imperial: false }).addTo(map);
+
+  map.pm.setGlobalOptions({ pathOptions: AOI_STYLE, snappable: false, allowSelfIntersection: false });
+  map.on("pm:create", (e) => {
+    setAoiLayer(e.layer);
+    e.layer.on("pm:edit", () => onAoi?.(geometry()));
   });
+  map.on("click", (e) => onMapClick?.(e));
+  return map;
+}
 
-  // Esri World Imagery (yagona basemap, 2D)
-  L.tileLayer(
-    "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
-    {
-      maxZoom: 19,
-      attribution: "Tiles © Esri",
-    }
-  ).addTo(mapInstance);
+function setAoiLayer(layer) {
+  if (aoiLayer && aoiLayer !== layer) map.removeLayer(aoiLayer);
+  aoiLayer = layer;
+  onAoi?.(geometry());
+}
 
-  L.control.zoom({ position: "bottomright" }).addTo(mapInstance);
+export function geometry() {
+  return aoiLayer ? aoiLayer.toGeoJSON().geometry : null;
+}
 
-  // Agar Geoman kutubxonasi mavjud bo'lsa
-  if (mapInstance.pm) {
-    mapInstance.pm.setLang("uz");
-    mapInstance.pm.setPathOptions({
-      color: "#38bdf8",
-      fillColor: "#38bdf8",
-      fillOpacity: 0.15,
-      weight: 2,
-    });
+export function drawShape(kind) {
+  map.pm.disableDraw();
+  map.pm.enableDraw(kind === "rect" ? "Rectangle" : "Polygon", { pathOptions: AOI_STYLE });
+}
 
-    mapInstance.on("pm:create", (e) => {
-      clearAoiLayer();
-      currentAoiLayer = e.layer;
-      const geoJson = e.layer.toGeoJSON();
-      if (onAoiCreated) onAoiCreated(geoJson, currentAoiLayer);
-    });
+export function clearAoi() {
+  map.pm.disableDraw();
+  if (aoiLayer) map.removeLayer(aoiLayer);
+  aoiLayer = null;
+}
+
+/** Saqlangan geometriyani (masalan, sahifa qayta yuklanganda) xaritaga qaytaradi. */
+export function showAoi(geom, fit = true) {
+  if (!geom) return;
+  const layer = L.geoJSON(geom, { style: AOI_STYLE }).getLayers()[0];
+  layer.addTo(map);
+  if (aoiLayer && aoiLayer !== layer) map.removeLayer(aoiLayer);
+  aoiLayer = layer;
+  if (fit) map.fitBounds(layer.getBounds(), { padding: [30, 30] });
+}
+
+export function getMap() {
+  return map;
+}
+
+export function getAoiLayer() {
+  return aoiLayer;
+}
+
+/** Ishlayotganda xaritaning barcha interaktivligini oʻchiradi. */
+export function setMapLocked(locked) {
+  const handlers = ["dragging", "touchZoom", "doubleClickZoom", "scrollWheelZoom", "boxZoom", "keyboard"];
+  handlers.forEach((h) => (locked ? map[h]?.disable() : map[h]?.enable()));
+  if (locked) map.pm.disableDraw();
+  if (aoiLayer?.pm) locked ? aoiLayer.pm.disable() : null;
+}
+
+/** Faqat koʻrsatish uchun: sferadagi koʻpburchak maydoni (km²). Tekshiruv backendda. */
+export function areaKm2(geom) {
+  if (!geom) return 0;
+  const R = 6378137;
+  const ring = geom.coordinates[0];
+  let a = 0;
+  for (let i = 0; i < ring.length - 1; i++) {
+    const [lon1, lat1] = ring[i].map((d) => (d * Math.PI) / 180);
+    const [lon2, lat2] = ring[i + 1].map((d) => (d * Math.PI) / 180);
+    a += (lon2 - lon1) * (2 + Math.sin(lat1) + Math.sin(lat2));
   }
-
-  // Xaritada bosilganda piksel qiymatlarini so'rash
-  mapInstance.on("click", (e) => {
-    const currentState = stateManager.getState();
-    if (currentState === AppState.DONE) {
-      handleMapClick(mapInstance, e, stateManager.currentRunId);
-    }
-  });
-
-  return mapInstance;
-}
-
-export function drawShape(shapeType) {
-  if (!mapInstance || !mapInstance.pm) return;
-  clearAoiLayer();
-  if (shapeType === "Rectangle") {
-    mapInstance.pm.enableDraw("Rectangle");
-  } else if (shapeType === "Polygon") {
-    mapInstance.pm.enableDraw("Polygon");
-  }
-}
-
-export function clearAoiLayer() {
-  if (currentAoiLayer && mapInstance) {
-    mapInstance.removeLayer(currentAoiLayer);
-    currentAoiLayer = null;
-  }
-}
-
-export function getMapInstance() {
-  return mapInstance;
-}
-
-export function getCurrentAoiLayer() {
-  return currentAoiLayer;
+  return Math.abs((a * R * R) / 2) / 1e6;
 }

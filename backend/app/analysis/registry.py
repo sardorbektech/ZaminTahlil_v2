@@ -1,7 +1,6 @@
-"""Analizatorlar registri (Registry).
+"""Analizatorlar registri.
 
-Quvur (pipeline) analizatorlarni to'g'ridan-to'g'ri import qilmaydi,
-balki ushbu registrdan nomi bo'yicha oladi.
+Quvur analizatorlarni to'g'ridan-to'g'ri import qilmaydi — faqat shu registrdan nomi bo'yicha oladi.
 """
 
 from backend.app.analysis.interface import Analyzer
@@ -10,7 +9,7 @@ _ANALYZERS: dict[str, Analyzer] = {}
 
 
 def register_analyzer(analyzer: Analyzer) -> None:
-    """Yangi analizatorni registrga kiritadi."""
+    """Analizatorni registrga kiritadi (bir xil nom bo'lsa almashtiradi)."""
     _ANALYZERS[analyzer.name] = analyzer
 
 
@@ -18,13 +17,17 @@ def get_analyzer(name: str) -> Analyzer:
     """Nomi bo'yicha analizatorni qaytaradi.
 
     Raises:
-        KeyError: Agar analizator topilmasa.
+        KeyError: analizator topilmasa.
     """
+    if not _ANALYZERS:
+        from backend.app.analysis.analyzers import init_all_analyzers
+
+        init_all_analyzers()
     if name not in _ANALYZERS:
         raise KeyError(f"Analizator topilmadi: {name}")
     return _ANALYZERS[name]
 
 
-def list_analyzers() -> list[str]:
-    """Ro'yxatdan o'tgan barcha analizatorlar nomini qaytaradi."""
-    return list(_ANALYZERS.keys())
+def list_analyzers() -> dict[str, str]:
+    """Ro'yxatdan o'tgan analizatorlar: {nom: versiya}."""
+    return {k: v.version for k, v in _ANALYZERS.items()}

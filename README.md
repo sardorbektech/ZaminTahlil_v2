@@ -32,7 +32,8 @@ ZaminTahlil — foydalanuvchi xaritada tanlagan hudud (to'g'ri to'rtburchak yoki
    ```bash
    cp .env.example .env
    ```
-   `.env` fayliga kerakli GEE va AI API kalitlarini kiriting.
+   `.env` fayliga GEE loyihalari, xizmat hisobi kalit fayllari (`secrets/` papkasida, git'ga kirmaydi)
+   va AI API kalitlarini kiriting. `.env` va `secrets/` hech qachon commit qilinmaydi.
 
 ---
 
@@ -40,7 +41,7 @@ ZaminTahlil — foydalanuvchi xaritada tanlagan hudud (to'g'ri to'rtburchak yoki
 
 Serverni ishga tushirish:
 ```bash
-.venv\Scripts\python.exe -m uvicorn backend.app.main:app --reload
+.venv\Scripts\python.exe -m uvicorn backend.app.main:app --reload --no-access-log
 ```
 Ilova brauzerda ochiladi: `http://localhost:8000`
 API hujjatlari (Swagger): `http://localhost:8000/docs`
@@ -73,4 +74,5 @@ Linter va format tekshiruvi:
 - `backend/app/ai/` — OpenRouter/OpenAI/Ollama orqali Markdown hisobot generatori
 - `backend/app/usage/` — API chaqiruvlari hisobi va nazorati (JSONL)
 - `frontend/` — Leaflet asosidagi statik interfeys (HTML/CSS/JS)
-- `tests/` — Deterministik oflayn testlar to'plami
+- `tests/` — Tarmoqsiz testlar (soxta GEE manbasi `tests/fakes.py`)
+- `docs/DECISIONS.md` — SIMPLE.md da yozilmagan texnik qarorlar

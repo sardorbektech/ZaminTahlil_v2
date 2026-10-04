@@ -1,51 +1,51 @@
-"""Tizim telemetriyasi, loglash va terminalga jonli xabarlar chiqarish moduli.
+"""Ilova loglari: faqat data/logs/app/ katalogidagi fayllarga yoziladi.
 
-Foydalanuvchining talabiga ko'ra har bir jarayon, qaysi sun'iy yo'ldoshdan
-qanday ma'lumotlar kelayotgani terminalda to'liq ko'rsatiladi.
-Shuningdek, to'liq loglar data/logs/app/app.log fayliga yoziladi.
+SIMPLE.md §14 bo'yicha terminalga hech narsa chop etilmaydi. Ishlab chiqish paytida
+qaysi sensor, qaysi sana va qaysi bandlar kelayotganini terminalda ko'rish kerak bo'lsa,
+`.env` da `LOG_TO_CONSOLE=true` yoqiladi (docs/DECISIONS.md, 1-qaror).
+API chaqiruvlari jurnali (usage/tracker.py) hech qachon terminalga chiqmaydi.
 """
 
 import logging
 import sys
-from datetime import UTC, datetime
+from logging.handlers import TimedRotatingFileHandler
 
-from backend.app.core.config import APP_LOG_DIR
-from backend.app.core.time import fmt_local
+from backend.app.core.config import APP_LOG_DIR, settings
+from backend.app.core.time import fmt_local, now_ts
 
-# Asosiy logger
 logger = logging.getLogger("zamintahil")
 logger.setLevel(logging.INFO)
+logger.propagate = False
 
-# Faylga yozuvchi handler
-log_file = APP_LOG_DIR / f"{datetime.now(UTC).strftime('%Y-%m-%d')}.log"
-file_handler = logging.FileHandler(log_file, encoding="utf-8")
-file_formatter = logging.Formatter("[%(asctime)s] [%(levelname)s] [%(name)s] %(message)s")
-file_handler.setFormatter(file_formatter)
-logger.addHandler(file_handler)
+if not logger.handlers:
+    _file_handler = TimedRotatingFileHandler(
+        APP_LOG_DIR / "app.log", when="midnight", backupCount=30, encoding="utf-8", utc=True
+    )
+    _file_handler.setFormatter(
+        logging.Formatter("[%(asctime)s] [%(levelname)s] [%(name)s] %(message)s")
+    )
+    logger.addHandler(_file_handler)
 
-# Terminalga chiqaruvchi handler (foydalanuvchi talabi)
-console_handler = logging.StreamHandler(sys.stdout)
-console_formatter = logging.Formatter("%(message)s")
-console_handler.setFormatter(console_formatter)
-logger.addHandler(console_handler)
+    if settings.log_to_console:
+        _console = logging.StreamHandler(sys.stderr)
+        _console.setFormatter(logging.Formatter("%(message)s"))
+        logger.addHandler(_console)
 
 
 def log_telemetry(sensor: str, event: str, details: str, ts: int | None = None) -> None:
-    """Sun'iy yo'ldosh yoki tizim hodisasini terminal va logga yozadi.
+    """Sun'iy yo'ldosh yoki ma'lumot hodisasini log fayliga yozadi.
 
     Args:
-        sensor: Sun'iy yo'ldosh nomi (Sentinel-2, Sentinel-1, Landsat, SMAP, DEM, Weather).
-        event: Hodisa turi (Yuklanmoqda, Qabul qilindi, Tahlil qilinmoqda, Xatolik).
-        details: Qo'shimcha tafsilotlar (Scene ID, bandlar, maydon).
-        ts: Ma'lumotning olingan vaqti (UTC epoch).
+        sensor: Manba nomi (Sentinel-2, Sentinel-1, Landsat, SMAP, DEM, Ob-havo).
+        event: Hodisa turi (Yuklanmoqda, Qabul qilindi, Xatolik).
+        details: Tafsilotlar (scene ID, bandlar, o'lcham).
+        ts: Ma'lumotning olingan vaqti (UTC epoch); bo'lmasa joriy vaqt.
     """
-    time_str = fmt_local(ts) if ts else fmt_local(int(datetime.now(UTC).timestamp()))
-    msg = f"🛰️ [{sensor.upper()}] | {event.upper()} | {details} | Sana: {time_str}"
-    logger.info(msg)
+    time_str = fmt_local(ts if ts is not None else now_ts())
+    logger.info(f"[{sensor.upper()}] {event} | {details} | Sana: {time_str}")
 
 
 def log_step(step_num: int, total_steps: int, title: str, details: str = "") -> None:
-    """Quvur bosqichini terminalga chiroyli chop etadi."""
+    """Quvur bosqichini log fayliga yozadi."""
     det_str = f" - {details}" if details else ""
-    msg = f"⏳ [BOSQICH {step_num}/{total_steps}] {title}{det_str}"
-    logger.info(msg)
+    logger.info(f"[BOSQICH {step_num}/{total_steps}] {title}{det_str}")

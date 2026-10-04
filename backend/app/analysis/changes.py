@@ -1,55 +1,72 @@
-"""Kuzatuv sanalari bo'yicha dinamik o'zgarishlarni aniqlash moduli.
+"""Ketma-ket haqiqiy kuzatuvlar orasidagi o'zgarishlar (SIMPLE.md §7.5).
 
-Ketma-ket haqiqiy kuzatuvlar orasidagi farqlar (ΔNDVI, ΔNDWI, ΔNDMI, ΔVV, ΔSM)
-va sinflararo o'tishlar (class transitions) matritsasi.
+ΔNDVI, ΔNDWI, ΔNDMI, ΔNBR, ΔVV va sinflararo o'tishlar. Interpolatsiya qilingan kadrlar ishlatilmaydi.
 """
 
 from typing import Any
 
 import numpy as np
 
-from backend.app.core.constants import CLASS_LABELS_UZ
+from backend.app.core.constants import CHANGE_TRANSITION_MIN_PCT, CLASS_LABELS_UZ, CLASS_UNKNOWN
 
 
 def compute_delta_array(current: np.ndarray, previous: np.ndarray) -> np.ndarray:
-    """Ikkita kuzatuv orasidagi pikselma-piksel farqni (Δ = joriy - oldingi) hisoblaydi."""
+    """Pikselma-piksel farq: Δ = joriy − oldingi. Birortasi NaN bo'lsa natija NaN."""
     with np.errstate(invalid="ignore"):
-        delta = current - previous
-    return delta.astype(np.float32)
+        return (current.astype(np.float32) - previous.astype(np.float32)).astype(np.float32)
 
 
 def compute_class_transitions(
-    current_classes: np.ndarray, previous_classes: np.ndarray
-) -> list[dict[str, Any]]:
-    """Sinflar o'rtasidagi o'zgarishlarni (masalan: Ochiq tuproq -> Ekin) aniqlaydi."""
-    valid_mask = (current_classes > 0) & (previous_classes > 0)
+    current_classes: np.ndarray,
+    previous_classes: np.ndarray,
+    aoi_mask: np.ndarray | None = None,
+    min_pct: float = CHANGE_TRANSITION_MIN_PCT,
+) -> dict[str, Any]:
+    """Ikki sana orasidagi sinf o'tishlari (ikkala sanada ham ma'lum bo'lgan piksellar bo'yicha).
+
+    Natija: taqqoslangan piksellar soni, o'zgargan ulush va o'tishlar ro'yxati
+    (har biri: dan/ga sinf, piksellar, umumiy taqqoslangan piksellardagi %).
+    """
+    valid = (current_classes != CLASS_UNKNOWN) & (previous_classes != CLASS_UNKNOWN)
+    if aoi_mask is not None:
+        valid &= aoi_mask.astype(bool)
+    total = int(valid.sum())
+    if total == 0:
+        return {"compared_pixels": 0, "changed_pct": None, "transitions": []}
+
+    prev_v = previous_classes[valid].astype(np.int32)
+    curr_v = current_classes[valid].astype(np.int32)
+    changed = prev_v != curr_v
     transitions: list[dict[str, Any]] = []
+    if changed.any():
+        codes = prev_v[changed] * 100 + curr_v[changed]
+        uniq, counts = np.unique(codes, return_counts=True)
+        for code, cnt in zip(uniq.tolist(), counts.tolist(), strict=True):
+            pct = cnt / total * 100.0
+            if pct < min_pct:
+                continue
+            f, t = code // 100, code % 100
+            transitions.append(
+                {
+                    "from_code": f,
+                    "from_label": CLASS_LABELS_UZ.get(f, "Nomaʼlum"),
+                    "to_code": t,
+                    "to_label": CLASS_LABELS_UZ.get(t, "Nomaʼlum"),
+                    "pixel_count": cnt,
+                    "pct": round(pct, 2),
+                }
+            )
+    transitions.sort(key=lambda x: -x["pct"])
+    return {
+        "compared_pixels": total,
+        "changed_pct": round(float(changed.sum()) / total * 100.0, 2),
+        "transitions": transitions,
+    }
 
-    curr_valid = current_classes[valid_mask]
-    prev_valid = previous_classes[valid_mask]
 
-    changed_mask = curr_valid != prev_valid
-    if not np.any(changed_mask):
-        return transitions
-
-    unique_pairs, counts = np.unique(
-        np.column_stack((prev_valid[changed_mask], curr_valid[changed_mask])),
-        axis=0,
-        return_counts=True,
-    )
-
-    total_valid = float(np.sum(valid_mask))
-    for (from_cls, to_cls), count in zip(unique_pairs, counts, strict=False):
-        pct = (float(count) / total_valid) * 100.0 if total_valid > 0 else 0.0
-        if pct >= 0.1:  # Kamida 0.1% hudud o'zgargan bo'lsa
-            transitions.append({
-                "from_code": int(from_cls),
-                "from_label": CLASS_LABELS_UZ.get(int(from_cls), "Nomaʼlum"),
-                "to_code": int(to_cls),
-                "to_label": CLASS_LABELS_UZ.get(int(to_cls), "Nomaʼlum"),
-                "pixel_count": int(count),
-                "pct": round(pct, 2),
-            })
-
-    transitions.sort(key=lambda x: x["pct"], reverse=True)
-    return transitions
+def class_change_mask(current_classes: np.ndarray, previous_classes: np.ndarray) -> np.ndarray:
+    """Sinf o'zgargan piksellar niqobi: 1 — o'zgargan, 0 — o'zgarmagan, NaN — taqqoslab bo'lmaydi."""
+    valid = (current_classes != CLASS_UNKNOWN) & (previous_classes != CLASS_UNKNOWN)
+    out = np.full(current_classes.shape, np.nan, dtype=np.float32)
+    out[valid] = (current_classes[valid] != previous_classes[valid]).astype(np.float32)
+    return out

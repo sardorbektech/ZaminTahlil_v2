@@ -1,36 +1,46 @@
-"""Bekor qilish (cancellation) va tozalash testlari."""
+"""Bekor qilish: ~2 soniyada vazifa to'xtaydi, fayllar va DB qatorlari o'chiriladi, `cancelled` hodisasi."""
 
 import asyncio
+import time
 
-import pytest
+from httpx import AsyncClient
 
-from backend.app.core.config import RUNS_DIR
-from backend.app.pipeline.cancellation import (
-    cancel_run,
-    is_cancellation_requested,
-    register_active_run,
-)
+from backend.app.db import session as db
+from backend.app.db.models import RunModel
+from backend.app.pipeline import storage as st
+from backend.app.pipeline.jobs import job_manager
+from tests.conftest import AOI
 
 
-@pytest.mark.asyncio
-async def test_cancellation_cleans_resources():
-    test_run_id = 99999
-    run_folder = RUNS_DIR / str(test_run_id)
-    run_folder.mkdir(parents=True, exist_ok=True)
-    dummy_file = run_folder / "test.png"
-    dummy_file.write_text("test")
+async def test_cancel_cleans_files_rows_and_unlocks(client: AsyncClient, isolated_env):
+    isolated_env["source"].delay_s = 0.4
+    rid = (await client.post("/api/v1/recon", json={"aoi": AOI})).json()["run_id"]
+    job = job_manager.get_job(rid)
+    # Yuklash bosqichi boshlanguncha kutish (fayllar diskda paydo bo'ladi)
+    for _ in range(200):
+        if st.run_dir(rid).exists():
+            break
+        await asyncio.sleep(0.02)
+    assert st.run_dir(rid).exists()
 
-    # Soxta task yaratish
-    async def dummy_work():
-        await asyncio.sleep(10)
+    t0 = time.perf_counter()
+    r = await client.post(f"/api/v1/recon/{rid}/cancel")
+    elapsed = time.perf_counter() - t0
+    assert r.status_code == 200 and r.json()["cancelled"] is True
+    assert elapsed < 2.5
+    assert job is not None and job.task is not None and job.task.done()
+    assert job.events[-1]["type"] == "cancelled"
+    assert not st.run_dir(rid).exists()
+    async with db.session_scope() as s:
+        assert await s.get(RunModel, rid) is None
+    assert job_manager.active_run_id() is None
+    assert (await client.get("/api/v1/recon/active")).json()["active"] is False
 
-    task = asyncio.create_task(dummy_work())
-    register_active_run(test_run_id, task)
+    # Qayta bekor qilish — faol emas
+    again = await client.post(f"/api/v1/recon/{rid}/cancel")
+    assert again.status_code == 409
 
-    # Bekor qilish
-    assert not is_cancellation_requested(test_run_id)
-    await cancel_run(test_run_id)
-
-    # Tekshirish
-    assert task.cancelled() or task.done()
-    assert not run_folder.exists()
+    # Yangi run boshlash mumkin
+    isolated_env["source"].delay_s = 0.0
+    r2 = await client.post("/api/v1/recon", json={"aoi": AOI})
+    assert r2.status_code == 200

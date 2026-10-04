@@ -1,72 +1,92 @@
-"""Sozlamalar API marshruti (/api/v1/settings)."""
+"""Sozlamalar API (/api/v1/settings). Maxfiy qiymatlar hech qachon qaytarilmaydi."""
 
 from typing import Any
 
 from fastapi import APIRouter, Depends
-from pydantic import BaseModel
+from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.app.ai.client import ai_client
+from backend.app.core import constants as C
+from backend.app.core.errors import ConflictError, ValidationAppError
+from backend.app.core.run_settings import SETTINGS_FIELDS, RunSettings, RunSettingsUpdate
 from backend.app.db.models import SettingsModel
-from backend.app.db.session import get_db
+from backend.app.db.session import get_db, load_run_settings
+from backend.app.gee.auth import PRIMARY, SECONDARY, is_role_configured
+from backend.app.pipeline.jobs import job_manager
 
 router = APIRouter(prefix="/settings", tags=["Sozlamalar"])
 
+FIELD_LABELS_UZ = {
+    "lookback_days": "Kuzatuv davri (kun)",
+    "weather_past_days": "Oʻtgan ob-havo (kun)",
+    "weather_forecast_days": "Prognoz (kun)",
+    "max_scene_cloud_pct": "Kadr bulutliligi chegarasi (%)",
+    "cloud_score_threshold": "Cloud Score+ chegarasi",
+    "s1_orbit_pass": "Sentinel-1 orbita yoʻnalishi",
+    "analysis_resolution_m": "Tahlil aniqligi (m)",
+    "max_aoi_km2": "Maksimal hudud (km²)",
+    "gee_request_timeout_s": "GEE soʻrov muddati (s)",
+    "gee_max_retries": "GEE qayta urinishlar",
+    "gee_max_concurrency": "GEE parallel soʻrovlar",
+    "ai_provider": "AI provayderi",
+    "ai_model": "AI modeli",
+    "ai_history_size": "AI xabarlar tarixi",
+}
 
-class SettingsUpdateSchema(BaseModel):
-    lookback_days: int | None = None
-    weather_past_days: int | None = None
-    weather_forecast_days: int | None = None
-    max_scene_cloud_pct: float | None = None
-    cloud_score_threshold: float | None = None
-    s1_orbit_pass: str | None = None
-    analysis_resolution_m: float | None = None
-    max_aoi_km2: float | None = None
-    gee_request_timeout_s: int | None = None
-    gee_max_retries: int | None = None
-    gee_max_concurrency: int | None = None
-    ai_provider: str | None = None
-    ai_model: str | None = None
-    ai_history_size: int | None = None
+
+def _out(s: RunSettings) -> dict[str, Any]:
+    return {
+        "settings": s.model_dump(),
+        "labels_uz": FIELD_LABELS_UZ,
+        "limits": {
+            "lookback_days": C.LOOKBACK_DAYS_RANGE,
+            "weather_past_days": C.WEATHER_DAYS_RANGE,
+            "weather_forecast_days": C.WEATHER_DAYS_RANGE,
+            "max_scene_cloud_pct": C.CLOUD_PCT_RANGE,
+            "cloud_score_threshold": C.CLOUD_SCORE_RANGE,
+            "analysis_resolution_m": C.RESOLUTION_M_RANGE,
+            "max_aoi_km2": C.MAX_AOI_KM2_RANGE,
+            "gee_request_timeout_s": C.GEE_TIMEOUT_RANGE,
+            "gee_max_retries": C.GEE_RETRIES_RANGE,
+            "gee_max_concurrency": C.GEE_CONCURRENCY_RANGE,
+            "ai_history_size": C.AI_HISTORY_RANGE,
+        },
+        "choices": {"s1_orbit_pass": C.S1_ORBIT_PASS_VALUES, "ai_provider": C.AI_PROVIDERS},
+        "configured": {
+            "gee_primary": is_role_configured(PRIMARY),
+            "gee_secondary": is_role_configured(SECONDARY),
+            **{f"ai_{k}": p.is_configured() for k, p in ai_client.providers.items()},
+        },
+    }
 
 
 @router.get("")
 async def get_system_settings(db: AsyncSession = Depends(get_db)) -> dict[str, Any]:
-    """Tizim sozlamalarini qaytaradi."""
-    settings_obj = await db.get(SettingsModel, 1)
-    if not settings_obj:
-        return {}
-    return {
-        "lookback_days": settings_obj.lookback_days,
-        "weather_past_days": settings_obj.weather_past_days,
-        "weather_forecast_days": settings_obj.weather_forecast_days,
-        "max_scene_cloud_pct": settings_obj.max_scene_cloud_pct,
-        "cloud_score_threshold": settings_obj.cloud_score_threshold,
-        "s1_orbit_pass": settings_obj.s1_orbit_pass,
-        "analysis_resolution_m": settings_obj.analysis_resolution_m,
-        "max_aoi_km2": settings_obj.max_aoi_km2,
-        "gee_request_timeout_s": settings_obj.gee_request_timeout_s,
-        "gee_max_retries": settings_obj.gee_max_retries,
-        "gee_max_concurrency": settings_obj.gee_max_concurrency,
-        "ai_provider": settings_obj.ai_provider,
-        "ai_model": settings_obj.ai_model,
-        "ai_history_size": settings_obj.ai_history_size,
-    }
+    """Joriy sozlamalar, ruxsat etilgan oraliqlar va qaysi xizmatlar sozlanganligi (kalitlarsiz)."""
+    return _out(await load_run_settings(db))
 
 
 @router.put("")
-async def update_system_settings(
-    payload: SettingsUpdateSchema, db: AsyncSession = Depends(get_db)
-) -> dict[str, Any]:
-    """Tizim sozlamalarini yangilaydi."""
-    settings_obj = await db.get(SettingsModel, 1)
-    if not settings_obj:
-        settings_obj = SettingsModel(id=1)
-        db.add(settings_obj)
-
-    update_data = payload.model_dump(exclude_unset=True)
-    for k, v in update_data.items():
-        if v is not None:
-            setattr(settings_obj, k, v)
-
+async def update_system_settings(payload: RunSettingsUpdate, db: AsyncSession = Depends(get_db)) -> dict[str, Any]:
+    """Sozlamalarni qisman yangilaydi (tekshiruv bilan). Vazifa bajarilayotganda — 409."""
+    if job_manager.active_run_id() is not None:
+        raise ConflictError("Vazifa bajarilayotganda sozlamalarni oʻzgartirib boʻlmaydi.")
+    current = await load_run_settings(db)
+    merged = {**current.model_dump(), **payload.model_dump(exclude_unset=True, exclude_none=True)}
+    try:
+        new = RunSettings(**merged)
+    except ValidationError as e:
+        field = str(e.errors()[0]["loc"][0]) if e.errors() else ""
+        raise ValidationAppError(
+            f"Notoʻgʻri qiymat: {FIELD_LABELS_UZ.get(field, field)}", code="INVALID_SETTINGS"
+        ) from e
+    row = await db.get(SettingsModel, 1)
+    if row is None:
+        row = SettingsModel(id=1, **new.model_dump())
+        db.add(row)
+    else:
+        for k in SETTINGS_FIELDS:
+            setattr(row, k, getattr(new, k))
     await db.commit()
-    return {"message_uz": "Sozlamalar muvaffaqiyatli yangilandi"}
+    return {"message_uz": "Sozlamalar saqlandi", **_out(new)}

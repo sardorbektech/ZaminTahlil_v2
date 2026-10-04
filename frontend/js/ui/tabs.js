@@ -1,23 +1,13 @@
-/**
- * O'ng paneldagi 6 ta tab almashinuvini boshqarish moduli.
- */
+/** Oʻng panel tablari. Tab ochilganda uning sahifalari qayta oʻlchanadi. */
+import { repaginate } from "./paginate.js";
 
 export function initTabs() {
-  const tabButtons = document.querySelectorAll(".tab-btn");
-  const tabContents = document.querySelectorAll(".tab-content");
-
-  tabButtons.forEach((btn) => {
+  const tabs = document.querySelectorAll(".tab");
+  tabs.forEach((btn) =>
     btn.addEventListener("click", () => {
-      const targetId = btn.getAttribute("data-tab");
-
-      tabButtons.forEach((b) => b.classList.remove("active"));
-      tabContents.forEach((c) => c.classList.remove("active"));
-
-      btn.classList.add("active");
-      const targetContent = document.getElementById(targetId);
-      if (targetContent) {
-        targetContent.classList.add("active");
-      }
-    });
-  });
+      tabs.forEach((b) => b.classList.toggle("active", b === btn));
+      document.querySelectorAll(".tab-pane").forEach((p) => p.classList.toggle("active", p.id === `pane-${btn.dataset.tab}`));
+      document.querySelectorAll(`#pane-${btn.dataset.tab} .paged`).forEach(repaginate);
+    }),
+  );
 }

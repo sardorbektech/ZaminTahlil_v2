@@ -1,120 +1,173 @@
-/* ZaminTahlil v2 — Asosiy Stillar (Single Page, No Scroll) */
-
+/* ZaminTahlil — asosiy maket. Hech qayerda scroll yoʻq: kontent tablar va sahifalash orqali sigʻadi. */
 :root {
-  --bg-primary: #0f172a;
-  --bg-secondary: #1e293b;
-  --bg-tertiary: #334155;
-  --text-main: #f8fafc;
-  --text-muted: #94a3b8;
+  --bg: #0b1220;
+  --bg2: #121b2e;
+  --bg3: #1c2840;
+  --line: #2a3756;
+  --text: #e6ecf5;
+  --muted: #8d9bb5;
   --accent: #38bdf8;
-  --accent-hover: #0284c7;
-  --success: #10b981;
-  --warning: #f59e0b;
+  --accent2: #0ea5e9;
+  --ok: #22c55e;
+  --warn: #f59e0b;
   --danger: #ef4444;
-  --border: #334155;
-  --font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --radius: 6px;
+  --font: system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
+  --mono: ui-monospace, "Cascadia Mono", Consolas, monospace;
 }
 
-* {
-  box-sizing: border-box;
-  margin: 0;
-  padding: 0;
-  user-select: none;
-}
+* { box-sizing: border-box; margin: 0; padding: 0; }
 
 html, body {
-  width: 100vw;
-  height: 100vh;
-  overflow: hidden !important; /* Butun sahifada vertikal va gorizontal scroll taqiqlanadi */
-  background-color: var(--bg-primary);
-  color: var(--text-main);
-  font-family: var(--font-family);
-  font-size: 13px;
-}
-
-#app-container {
-  display: flex;
-  flex-direction: column;
   width: 100%;
   height: 100%;
+  overflow: hidden !important;
+  background: var(--bg);
+  color: var(--text);
+  font: 13px/1.4 var(--font);
+}
+
+*, *::before, *::after { scrollbar-width: none; }
+*::-webkit-scrollbar { display: none; }
+
+#app {
+  display: grid;
+  grid-template-rows: 48px 1fr 54px;
+  width: 100vw;
+  height: 100vh;
   overflow: hidden;
 }
 
-/* Tugmalar va umumiy elementlar */
+button, select, input {
+  font: inherit;
+  color: inherit;
+}
+
 button {
-  background-color: var(--bg-secondary);
-  color: var(--text-main);
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  padding: 6px 12px;
-  font-size: 12px;
-  font-weight: 500;
-  cursor: pointer;
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  transition: all 0.15s ease;
+  background: var(--bg3);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 5px 10px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background .15s, border-color .15s, opacity .15s;
 }
+button:hover:not(:disabled) { border-color: var(--accent); }
+button:disabled { opacity: .4; cursor: not-allowed; }
+.btn-primary { background: var(--accent2); border-color: var(--accent2); color: #04121f; font-weight: 600; }
+.btn-primary:hover:not(:disabled) { background: var(--accent); }
+.btn-danger { background: #7f1d1d; border-color: var(--danger); }
+.icon-btn { background: transparent; border: none; padding: 2px 6px; }
+.ico { font-size: 14px; line-height: 1; }
 
-button:hover:not(:disabled) {
-  background-color: var(--bg-tertiary);
-  border-color: var(--accent);
+select, input[type="number"], input[type="text"] {
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 4px 6px;
+  min-width: 0;
 }
+input[type="range"] { accent-color: var(--accent); }
+input:disabled, select:disabled { opacity: .45; }
 
-button:disabled {
-  opacity: 0.45;
-  cursor: not-allowed;
+.muted { color: var(--muted); }
+.small { font-size: 11px; }
+.mono { font-family: var(--mono); font-size: 11px; }
+.badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--bg3);
+  border: 1px solid var(--line);
+  font-size: 12px;
+  white-space: nowrap;
 }
+.badge.state { color: var(--accent); }
+.flag { display: inline-block; padding: 0 6px; border-radius: 999px; font-size: 10px; font-weight: 600; }
+.flag.low { background: #7c2d12; color: #fed7aa; }
+.flag.cloud { background: #374151; color: #e5e7eb; }
+.flag.nodata { background: #3f3f46; color: #d4d4d8; }
 
-button.btn-primary {
-  background-color: var(--accent);
-  color: #0f172a;
-  border-color: var(--accent);
-  font-weight: 600;
-}
-
-button.btn-primary:hover:not(:disabled) {
-  background-color: var(--accent-hover);
-}
-
-button.btn-danger {
-  background-color: var(--danger);
-  color: #ffffff;
-  border-color: var(--danger);
-}
-
-button.btn-danger:hover:not(:disabled) {
-  background-color: #dc2626;
-}
-
-/* Toast xabarlari */
-#toast-container {
-  position: absolute;
-  top: 64px;
-  left: 50%;
-  transform: translateX(-50%);
-  z-index: 9999;
+/* Yuqori panel */
+#topbar {
   display: flex;
-  flex-direction: column;
-  gap: 8px;
-  pointer-events: none;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 0 10px;
+  background: var(--bg2);
+  border-bottom: 1px solid var(--line);
+  overflow: hidden;
 }
+.tb-group { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.tb-center { flex: 1; justify-content: center; }
+.brand { font-weight: 700; color: var(--accent); margin-right: 8px; letter-spacing: .3px; }
 
-.toast {
-  background-color: rgba(30, 41, 59, 0.95);
-  backdrop-filter: blur(8px);
-  color: var(--text-main);
-  border: 1px solid var(--accent);
-  border-radius: 6px;
-  padding: 8px 16px;
-  font-size: 13px;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
-  animation: fadeInOut 3s forwards;
+/* Ish maydoni */
+#workspace {
+  display: grid;
+  grid-template-columns: 1fr 400px;
+  min-height: 0;
+  overflow: hidden;
 }
+#map { width: 100%; height: 100%; min-height: 0; }
 
-@keyframes fadeInOut {
-  0% { opacity: 0; transform: translateY(-10px); }
-  10% { opacity: 1; transform: translateY(0); }
-  85% { opacity: 1; transform: translateY(0); }
-  100% { opacity: 0; transform: translateY(-10px); }
+/* Pastki panel */
+#bottombar {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  align-items: center;
+  padding: 0 12px;
+  background: var(--bg2);
+  border-top: 1px solid var(--line);
+  overflow: hidden;
+}
+.progress { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.progress-track { flex: 0 0 40%; height: 8px; background: var(--bg); border: 1px solid var(--line); border-radius: 999px; overflow: hidden; }
+.progress-fill { height: 100%; width: 0; background: linear-gradient(90deg, var(--accent2), var(--accent)); transition: width .3s; }
+.progress-text { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); }
+.slider { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.slider input { flex: 1; min-width: 0; }
+
+/* Ishlayotgan holatda hamma narsa qulflanadi (Toʻxtatishdan tashqari) */
+body.locked .leaflet-control-container,
+body.locked #panel { pointer-events: none; }
+body.locked #panel { opacity: .6; }
+
+/* Modal */
+.modal { position: fixed; inset: 0; background: rgba(2, 6, 23, .7); display: flex; align-items: center; justify-content: center; z-index: 5000; }
+.modal[hidden] { display: none; }
+.modal-box { width: min(720px, 94vw); max-height: 92vh; overflow: hidden; background: var(--bg2); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; display: flex; flex-direction: column; gap: 10px; }
+.modal-head, .modal-foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.modal-foot { justify-content: flex-end; }
+.modal-head h3 { color: var(--accent); font-size: 15px; }
+.settings-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 14px; }
+.settings-grid label { display: flex; flex-direction: column; gap: 3px; font-size: 12px; color: var(--muted); }
+.settings-grid input, .settings-grid select { color: var(--text); }
+.conn { display: flex; flex-wrap: wrap; gap: 6px; }
+.conn .badge.on { border-color: var(--ok); color: var(--ok); }
+.conn .badge.off { border-color: var(--line); color: var(--muted); }
+
+/* Toastlar */
+#toasts { position: fixed; top: 58px; left: 50%; transform: translateX(-50%); display: flex; flex-direction: column; gap: 6px; z-index: 6000; pointer-events: none; }
+.toast { background: var(--bg3); border: 1px solid var(--accent); padding: 8px 14px; border-radius: var(--radius); box-shadow: 0 6px 20px rgba(0,0,0,.4); animation: toast-in .2s ease-out; max-width: 60vw; }
+.toast.warn { border-color: var(--warn); }
+.toast.error { border-color: var(--danger); }
+@keyframes toast-in { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: none; } }
+
+/* Tor ekranlarda yuqori panel tugmalari faqat belgi bilan */
+@media (max-width: 1180px) {
+  #topbar .tb-group button > span:not(.ico) { display: none; }
+  #topbar #btn-recon > span, #topbar #btn-stop > span { display: inline; }
+  .brand { display: none; }
+  #workspace { grid-template-columns: 1fr 360px; }
+}
+@media (max-width: 860px) {
+  #workspace { grid-template-columns: 1fr 300px; }
+  #bottombar { grid-template-columns: 1fr; gap: 2px; }
+  #app { grid-template-rows: 48px 1fr 64px; }
 }

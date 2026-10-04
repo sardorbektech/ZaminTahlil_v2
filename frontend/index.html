@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="uz">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ZaminTahlil — Hudud Rekognossirovkasi</title>
+  
+  <!-- Leaflet CSS -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <!-- Leaflet Geoman CSS -->
+  <link rel="stylesheet" href="https://unpkg.com/@geoman-io/leaflet-geoman-free@2.14.2/dist/leaflet-geoman.css" />
+
+  <!-- Dastur Stillari -->
+  <link rel="stylesheet" href="css/main.css">
+  <link rel="stylesheet" href="css/map.css">
+  <link rel="stylesheet" href="css/panels.css">
+
+  <!-- Marked & DOMPurify (Markdown render qilish uchun) -->
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/dompurify/dist/purify.min.js"></script>
+</head>
+<body>
+
+  <div id="app-container">
+    
+    <!-- 1. Yuqori Panel (Topbar) -->
+    <header id="topbar">
+      <div class="topbar-left">
+        <span class="app-brand">🛰️ ZaminTahlil</span>
+        <button id="btn-draw-rect" title="Toʻgʻri toʻrtburchak chizish">⬛ Toʻgʻri toʻrtburchak</button>
+        <button id="btn-draw-poly" title="Koʻpburchak chizish">⬡ Koʻpburchak</button>
+        <button id="btn-clear" title="Hududni tozalash">🗑️ Tozalash</button>
+      </div>
+
+      <div class="topbar-center">
+        <span style="font-size: 12px; color: var(--text-muted);">Maydon:</span>
+        <span id="area-badge" class="area-badge">0.00 km²</span>
+      </div>
+
+      <div class="topbar-right">
+        <button id="btn-recon" class="btn-primary" disabled>🚀 Rekognossirovka</button>
+        <button id="btn-stop" class="btn-danger" disabled>⏹️ Toʻxtatish</button>
+        <button id="btn-settings">⚙️ Sozlamalar</button>
+      </div>
+    </header>
+
+    <!-- 2. Asosiy Maydon (Xarita + O'ng panel) -->
+    <div id="workspace">
+      <!-- Leaflet Xarita -->
+      <div id="map"></div>
+
+      <!-- O'ng Panel (Tablar) -->
+      <aside id="right-panel">
+        <nav class="tabs-header">
+          <button class="tab-btn active" data-tab="tab-layers">Qatlamlar</button>
+          <button class="tab-btn" data-tab="tab-info">Maʼlumot</button>
+          <button class="tab-btn" data-tab="tab-weather">Ob-havo</button>
+          <button class="tab-btn" data-tab="tab-satellites">Sunʼiy yoʻldoshlar</button>
+          <button class="tab-btn" data-tab="tab-report">Hisobot</button>
+          <button class="tab-btn" data-tab="tab-usage">Nazorat</button>
+        </nav>
+
+        <!-- Tab 1: Qatlamlar -->
+        <div id="tab-layers" class="tab-content active">
+          <div id="layers-list">
+            <p style="color: var(--text-muted); font-size: 12px;">Hozircha hisoblangan qatlamlar mavjud emas.</p>
+          </div>
+        </div>
+
+        <!-- Tab 2: Ma'lumot (Yer qoplami sinflari) -->
+        <div id="tab-info" class="tab-content">
+          <div id="info-content">
+            <p style="color: var(--text-muted); font-size: 12px;">Maʼlumot mavjud emas.</p>
+          </div>
+        </div>
+
+        <!-- Tab 3: Ob-havo -->
+        <div id="tab-weather" class="tab-content">
+          <div id="weather-content">
+            <p style="color: var(--text-muted); font-size: 12px;">Ob-havo maʼlumotlari yuklanmagan.</p>
+          </div>
+        </div>
+
+        <!-- Tab 4: Sun'iy yo'ldoshlar -->
+        <div id="tab-satellites" class="tab-content">
+          <div id="satellites-content">
+            <p style="color: var(--text-muted); font-size: 12px;">Kadrlari roʻyxati boʻsh.</p>
+          </div>
+        </div>
+
+        <!-- Tab 5: Hisobot -->
+        <div id="tab-report" class="tab-content">
+          <div style="display: flex; gap: 8px; margin-bottom: 12px;">
+            <button id="btn-download-report" class="btn-primary" style="flex: 1;">📥 Yuklab olish (.md)</button>
+            <button id="btn-regen-report">🔄 Qayta yaratish</button>
+          </div>
+          <div id="report-content" style="line-height: 1.6; font-size: 13px;">
+            <p style="color: var(--text-muted);">Hisobot hali tayyorlanmagan.</p>
+          </div>
+        </div>
+
+        <!-- Tab 6: Nazorat -->
+        <div id="tab-usage" class="tab-content">
+          <div id="usage-content">
+            <p style="color: var(--text-muted);">API chaqiruvlari hisoboti boʻsh.</p>
+          </div>
+        </div>
+      </aside>
+    </div>
+
+    <!-- 3. Pastki Panel (Progress va Slayder) -->
+    <footer id="bottom-bar">
+      <div id="progress-container" class="progress-container">
+        <div id="progress-bar-fill" class="progress-bar-fill"></div>
+      </div>
+
+      <div class="date-slider-container">
+        <span style="font-size: 11px; color: var(--text-muted);">Kuzatuv sanasi:</span>
+        <input type="range" id="date-slider" disabled style="flex: 1; accent-color: var(--accent);">
+        <span id="date-display" class="date-display">Sana tanlanmagan</span>
+      </div>
+    </footer>
+
+  </div>
+
+  <!-- Sozlamalar Modali -->
+  <div id="settings-modal" class="modal-overlay" style="display: none;">
+    <div class="modal-box">
+      <div class="modal-header">
+        <h3 style="color: var(--accent);">⚙️ Tizim Sozlamalari</h3>
+        <button id="btn-close-settings" style="background:transparent; border:none; font-size:16px;">✕</button>
+      </div>
+      <div class="form-group">
+        <label>Kuzatuv davri (kunlarda, 1–60):</label>
+        <input type="number" id="input-lookback" min="1" max="60" value="10">
+      </div>
+      <div class="form-group">
+        <label>Maksimal bulutlilik (%):</label>
+        <input type="number" id="input-max-cloud" min="0" max="100" value="40">
+      </div>
+      <div class="form-group">
+        <label>Tahlil aniqligi (metrlarda):</label>
+        <input type="number" id="input-resolution" min="5" max="100" value="10">
+      </div>
+      <div style="display: flex; justify-content: flex-end; gap: 10px; margin-top: 16px;">
+        <button id="btn-save-settings" class="btn-primary">Saqlash</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Xabarlar (Toasts) idishi -->
+  <div id="toast-container"></div>
+
+  <!-- Leaflet & Geoman kutubxonalari -->
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="https://unpkg.com/@geoman-io/leaflet-geoman-free@2.14.2/dist/leaflet-geoman.min.js"></script>
+
+  <!-- Asosiy JS ilovasi (ES module) -->
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>
